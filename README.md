@@ -12,8 +12,7 @@
 </p>
 
 <p align="center">
-  Dashboard interactivo para el análisis de importaciones chilenas (2017–2026).<br/>
-  Construido con <strong>Dash</strong>, <strong>Plotly</strong> y <strong>DuckDB</strong>.
+  Plataforma de inteligencia de negocio para importaciones chilenas que transforma ~17 GB de datos aduaneros en visualizaciones interactivas (8 tabs, 30+ gráficos) con búsqueda en milisegundos gracias a DuckDB.
 </p>
 
 ---
