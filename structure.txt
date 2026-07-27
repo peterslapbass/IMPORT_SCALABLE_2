@@ -1,0 +1,15 @@
+DASH_APP/
+│
+├── app.py
+├── layout.py
+├── callbacks.py
+├── utils/
+│   └── helpers.py
+├── data/
+│   ├── import.csv
+│   ├── comunas.csv
+│   └── puertos_coordenadas.csv
+├── uploads/
+├── assets/
+│   ├── custom.css
+│   └── logo.png

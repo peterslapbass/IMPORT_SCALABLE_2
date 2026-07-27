@@ -1,0 +1,101 @@
+@media print {
+    @page {
+        size: A4 landscape;
+        margin: 6mm;
+    }
+
+    html, body {
+        background: #fff !important;
+        -webkit-print-color-adjust: exact;
+        print-color-adjust: exact;
+    }
+
+    /* Ocultar sidebar, toolbar, header */
+    div[style*="width: 300px"],
+    #btn-export-csv,
+    #btn-export-excel,
+    #btn-export-html,
+    #btn-print,
+    #cargar-button,
+    #carga-status,
+    div[style*="padding: 20px 30px"] {
+        display: none !important;
+    }
+
+    /* Forzar fondo blanco */
+    div[style*="background"] {
+        background: #fff !important;
+    }
+
+    /* Tabs: mostrar todos los contenidos sin pestañas */
+    .dash-tabs__tab {
+        display: none !important;
+    }
+    .dash-tabs__tab--selected {
+        display: none !important;
+    }
+    .tab-content {
+        display: block !important;
+    }
+    .dash-tab {
+        display: block !important;
+    }
+
+    /* Quitar cards y borders, mostrar todo en una columna */
+    div[style*="border: 1px solid"] {
+        border: none !important;
+        margin-bottom: 8px !important;
+        padding: 8px !important;
+        break-inside: avoid;
+        page-break-inside: avoid;
+    }
+
+    /* Texto oscuro */
+    * {
+        color: #000 !important;
+    }
+
+    .dash-spreadsheet-container {
+        max-height: none !important;
+        overflow: visible !important;
+    }
+
+    .dash-spreadsheet-inner table {
+        width: 100% !important;
+        border-collapse: collapse !important;
+    }
+
+    .dash-spreadsheet-inner th,
+    .dash-spreadsheet-inner td {
+        border: 1px solid #999 !important;
+        padding: 3px 5px !important;
+        font-size: 8pt !important;
+    }
+
+    .dash-spreadsheet-inner th {
+        background-color: #00cec9 !important;
+        font-weight: bold !important;
+    }
+
+    .dash-table-container .previous-next-container,
+    .dash-table-container .show-page,
+    .dash-table-container .current-page-container {
+        display: none !important;
+    }
+
+    .js-plotly-plot {
+        break-inside: avoid;
+        page-break-inside: avoid;
+        width: 100% !important;
+    }
+
+    svg {
+        max-width: 100% !important;
+        height: auto !important;
+    }
+
+    /* Quitar loading spinners */
+    .dash-loading {
+        display: none !important;
+    }
+}

@@ -1,0 +1,37 @@
+# --- Data (generated / too large) ---
+data/PARQUET/
+data/*.db
+data/*.db.wal
+data/DICCIONARIO.xlsx.bak
+data/import.txt
+
+# --- Python ---
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+
+# --- Virtual environment ---
+.venv/
+env/
+venv/
+
+# --- Uploads ---
+uploads/
+!uploads/.gitkeep
+
+# --- OS files ---
+.DS_Store
+Thumbs.db
+.directory
+._*
+
+# --- IDE ---
+.idea/
+.vscode/
+*.swp
+*.swo
