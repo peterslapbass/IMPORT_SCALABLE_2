@@ -193,7 +193,7 @@ Los archivos de importación contienen las siguientes columnas (definidas en `da
 
 ## Fuentes de datos
 
-- **Aduanas de Chile** — Archivos mensuales de importación con detalle de cada declaración (código arancelario, valor CIF, país de origen, transporte, etc.)
+- **Aduanas de Chile** — Archivos mensuales de importación con detalle de cada declaración (código arancelario, valor CIF, país de origen, transporte, etc.). Disponibles en datos.gob.cl
 - **Servicio de Impuestos Internos (SII)** — Registro de importadores con RUT y Razón Social (usado para mapear RUT → nombre de empresa en gráficos)
 - **Comext** ([comext.aduana.cl](http://comext.aduana.cl:7001)) — Diccionarios de códigos: formas de pago, monedas, bancos, regímenes de importación, etc. (se obtienen con `scripts/scrape_diccionarios_comext.py`)
 
