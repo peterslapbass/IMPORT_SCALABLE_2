@@ -1594,12 +1594,15 @@ def register_callbacks(app):
     # Autocomplete para importador (busqueda DuckDB contra archivo TSV)
     @app.callback(
         Output('primary-importador', 'options'),
+        Output('primary-importador', 'value', allow_duplicate=True),
         Input('primary-importador', 'search_value'),
+        State('primary-importador', 'value'),
         prevent_initial_call=True
     )
-    def autocomplete_importador(search_value):
+    def autocomplete_importador(search_value, current_value):
         if not search_value or len(search_value.strip()) < 2:
-            return []
+            # Conservar la selección actual aunque el término de búsqueda quede corto
+            return ([{'label': current_value, 'value': current_value}] if current_value else []), dash.no_update
         try:
             sv = search_value.strip().replace("'", "''")
             conn2 = _create_conn()
@@ -1610,10 +1613,14 @@ def register_callbacks(app):
                 LIMIT 50
             """).fetchdf()
             conn2.close()
-            return [{'label': f"{r['RUT']} - {str(r.get('RAZON_SOCIAL', '')).strip()}", 'value': str(r['RUT'])}
-                    for _, r in df.iterrows() if r['RUT'] is not None]
+            options = [{'label': f"{r['RUT']} - {str(r.get('RAZON_SOCIAL', '')).strip()}", 'value': str(r['RUT'])}
+                       for _, r in df.iterrows() if r['RUT'] is not None]
+            # Asegurar que la selección actual siempre esté presente para que no se pierda
+            if current_value and not any(o['value'] == current_value for o in options):
+                options.insert(0, {'label': current_value, 'value': current_value})
+            return options, dash.no_update
         except:
-            return []
+            return ([{'label': current_value, 'value': current_value}] if current_value else []), dash.no_update
 
     clientside_callback(
         """
