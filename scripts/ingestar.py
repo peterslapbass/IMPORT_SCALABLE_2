@@ -103,8 +103,20 @@ def procesar_año(año, check_only=False):
 
         path_sql = f_abs.replace("'", "''")
 
-        if not crear_db:
-            conn.execute("DELETE FROM importaciones")
+        if not crear_db and 'DD' in columnas:
+            dd_idx = columnas.index('DD')
+            if dd_idx < len(col_names):
+                dd_raw = col_names[dd_idx].replace('"', '""')
+                dd_expr = f'LPAD(CAST("{dd_raw}" AS VARCHAR), 8, \'0\')'
+                conn.execute(f"""
+                    DELETE FROM importaciones WHERE DD IN (
+                        SELECT CASE WHEN LENGTH({dd_expr}) = 8
+                             AND TRY_CAST({dd_expr} AS INTEGER) IS NOT NULL
+                             AND {dd_expr} != '00000000'
+                             THEN {dd_expr} END
+                        FROM read_parquet('{path_sql}')
+                    )
+                """)
 
         sql = f'INSERT INTO importaciones ({", ".join(insert_cols)}) SELECT {", ".join(selects)} FROM read_parquet(\'{path_sql}\')'
         conn.execute(sql)
