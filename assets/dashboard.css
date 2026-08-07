@@ -350,6 +350,7 @@ a { color: var(--accent); }
   transition: background-color 0.25s ease, border-color 0.25s ease;
 }
 .Select-value-label { color: var(--text-secondary) !important; }
+.Select-input > input, .Select-input { color: var(--text-secondary) !important; }
 .VirtualizedSelectOption { background-color: var(--bg-primary) !important; color: var(--text-secondary) !important; }
 .VirtualizedSelectFocusedOption { background-color: var(--bg-hover) !important; }
 .Select-placeholder { color: var(--text-muted) !important; }
