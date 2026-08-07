@@ -10,6 +10,7 @@ import duckdb, os, glob, time, argparse, sys
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 PARQUET_PATH = os.path.join(BASE, 'data', 'PARQUET')
 sys.path.insert(0, BASE)
+os.chdir(BASE)
 
 from utils.helpers import cargar_descripcion_estructura, COLUMNAS_DECIMALES, _db_path, _db_exists
 
