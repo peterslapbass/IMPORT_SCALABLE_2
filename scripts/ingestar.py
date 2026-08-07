@@ -104,10 +104,7 @@ def procesar_año(año, check_only=False):
         path_sql = f_abs.replace("'", "''")
 
         if not crear_db:
-            conn.execute(f"DELETE FROM importaciones WHERE DD IN (SELECT DD FROM read_parquet('{path_sql}') LIMIT 0)")
-            # No podemos saber qué filas corresponden a este archivo, mejor borrar y re-insertar
-            # Estrategia: eliminar el año completo si hay cambios (más simple)
-            conn.execute(f"DELETE FROM importaciones WHERE ANO = {año}")
+            conn.execute("DELETE FROM importaciones")
 
         sql = f'INSERT INTO importaciones ({", ".join(insert_cols)}) SELECT {", ".join(selects)} FROM read_parquet(\'{path_sql}\')'
         conn.execute(sql)
@@ -121,6 +118,7 @@ def procesar_año(año, check_only=False):
         print(f'    {fname}')
 
     if nuevos > 0 and not check_only:
+        conn.execute("ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS ANO INTEGER")
         conn.execute("""
             UPDATE importaciones SET ANO = TRY_CAST(SUBSTR(DD, 5, 4) AS INTEGER)
             WHERE DD IS NOT NULL AND LENGTH(DD) = 8 AND ANO IS NULL
