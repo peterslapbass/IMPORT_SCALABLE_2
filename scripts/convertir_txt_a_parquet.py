@@ -13,6 +13,7 @@ import os, sys, glob, re, argparse, time
 
 BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, BASE)
+os.chdir(BASE)
 
 import pandas as pd
 from utils.helpers import cargar_descripcion_estructura
