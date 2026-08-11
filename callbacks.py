@@ -7,7 +7,7 @@ import duckdb
 import plotly.express as px
 import plotly.graph_objects as go
 from utils.helpers import (
-    eliminar_acentos, import_dict, comunas_df, puertos_coords,
+    eliminar_acentos, import_dict, import_ruts_set, comunas_df, puertos_coords,
     cargar_diccionarios, cargar_diccionarios_categoria_hs, cargar_descripcion_estructura,
     leer_txt_sin_encabezado, obtener_importadores_coincidentes,
     obtener_metadata_parquet, query_aggregated, query_raw, query_parquet, query_distinct,
@@ -499,6 +499,22 @@ def _gen_importadores(conn, años, filters):
         import traceback; traceback.print_exc()
         return pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO'])
 
+
+def _gen_ruts_coincidentes(conn, años, filters):
+    try:
+        where_sql = ' AND '.join(filters) if filters else None
+        sql = 'SELECT DISTINCT CAST("NUM_UNICO_IMPORTADOR" AS VARCHAR) AS r FROM todas'
+        if where_sql:
+            sql += f' WHERE {where_sql}'
+        df = conn.execute(sql).fetchdf()
+        if df is None or df.empty:
+            return 0
+        loaded = set(df['r'].dropna().astype(str).str.strip())
+        return int(len(loaded & import_ruts_set))
+    except Exception:
+        import traceback; traceback.print_exc()
+        return 0
+
 def _gen_indicadores(df_mensual):
     try:
         total_cif = df_mensual['CIF_ITEM'].sum() if not df_mensual.empty else 0
@@ -842,7 +858,7 @@ def _gen_avg_price_analysis(conn, años, where_str):
 _TAB_CACHE_LOCK = threading.Lock()
 _TAB_CACHE = {}
 _TAB_GENS = {
-    'Resumen': ['monthly', 'yoy', 'price_hist', 'pct_bar', 'importer_conc'],
+    'Resumen': ['monthly', 'yoy', 'price_hist', 'pct_bar', 'importer_conc', 'ruts_coinc'],
     'Paises': ['country_analysis', 'heat_analysis', 'box_precios'],
     'Productos': ['section', 'top20_analysis', 'treemap'],
     'Transporte y Rutas': ['transporte', 'aduana', 'operacion', 'bultos', 'port_analysis'],
@@ -865,6 +881,7 @@ _GEN_CALLS = {
     'mapa_comunas':   (_gen_mapa_comunas,    lambda f, w, c: [w]),
     'port_analysis':  (_gen_port_analysis,   lambda f, w, c: [w]),
     'importadores':   (_gen_importadores,    lambda f, w, c: [f]),
+    'ruts_coinc':     (_gen_ruts_coincidentes, lambda f, w, c: [f]),
     'yoy':            (_gen_yoy,             lambda f, w, c: [w]),
     'transporte':     (_gen_transporte,      lambda f, w, c: [f]),
     'aduana':         (_gen_aduana,          lambda f, w, c: [f]),
@@ -941,6 +958,7 @@ def _build_tab(tab_name, results):
     if tab_name == 'Resumen':
         fig_m, fig_mk, fig_mkc, df_m = results['monthly']
         tc, tk, pk = _gen_indicadores(df_m)
+        n_ruts = results.get('ruts_coinc', 0) or 0
         card_indicadores = html.Div([
             html.Div([
                 html.Div("Total CIF", className='stat-label'),
@@ -953,6 +971,10 @@ def _build_tab(tab_name, results):
             html.Div([
                 html.Div("Precio por Kg", className='stat-label'),
                 html.Div(f"${pk:,.2f}", style={'color': 'var(--danger)'}, className='stat-value')
+            ], className='stat-item'),
+            html.Div([
+                html.Div("Nº RUTs Coincidentes", className='stat-label'),
+                html.Div(f"{n_ruts:,}", style={'color': 'var(--info)'}, className='stat-value')
             ], className='stat-item'),
         ], className='stat-card')
         return html.Div([

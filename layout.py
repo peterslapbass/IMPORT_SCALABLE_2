@@ -91,7 +91,7 @@ def create_layout(app):
                 _filtro_card("Años", dcc.Checklist(
                     id='year-checklist',
                     options=[{'label': a, 'value': a} for a in ANOS_DISPONIBLES],
-                    value=['2017', '2018'],
+                    value=['2024', '2025', '2026'],
                     inline=False,
                     labelStyle={'color': 'var(--text-secondary)', 'marginRight': '12px',
                                 'display': 'block', 'padding': '3px 0'}
