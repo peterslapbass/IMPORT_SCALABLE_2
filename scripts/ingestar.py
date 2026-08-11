@@ -12,7 +12,7 @@ PARQUET_PATH = os.path.join(BASE, 'data', 'PARQUET')
 sys.path.insert(0, BASE)
 os.chdir(BASE)
 
-from utils.helpers import cargar_descripcion_estructura, COLUMNAS_DECIMALES, _db_path, _db_exists
+from utils.helpers import cargar_descripcion_estructura, COLUMNAS_DECIMALES, _db_path, _db_exists, _MEMORY_LIMIT
 
 columnas = cargar_descripcion_estructura()
 ncols_din = len(columnas)
@@ -38,7 +38,7 @@ def procesar_año(año, check_only=False):
             return len(files), 0
         print(f'  [{año}] Creando base nueva...')
         conn = duckdb.connect(db)
-        conn.execute("PRAGMA memory_limit='8GB'")
+        conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
         conn.execute("PRAGMA threads=4")
         col_defs = [f'"{c}" DOUBLE' if c in COLUMNAS_DECIMALES else f'"{c}" VARCHAR' for c in columnas]
         conn.execute(f'CREATE TABLE importaciones ({", ".join(col_defs)})')
@@ -50,7 +50,7 @@ def procesar_año(año, check_only=False):
         """)
     else:
         conn = duckdb.connect(db)
-        conn.execute("PRAGMA memory_limit='8GB'")
+        conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
         conn.execute("PRAGMA threads=4")
         procesados = set(conn.execute("SELECT archivo FROM _fuentes").fetchdf()['archivo'])
 

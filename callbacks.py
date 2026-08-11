@@ -10,7 +10,7 @@ from utils.helpers import (
     eliminar_acentos, import_dict, comunas_df, puertos_coords,
     cargar_diccionarios, cargar_diccionarios_categoria_hs, cargar_descripcion_estructura,
     leer_txt_sin_encabezado, obtener_importadores_coincidentes,
-    obtener_metadata_parquet, query_aggregated, query_raw, query_parquet,
+    obtener_metadata_parquet, query_aggregated, query_raw, query_parquet, query_distinct,
     enriquecer_desde_diccionarios, listar_archivos_parquet, _create_conn, _attach_years,
     buscar_codigos_columna, get_global_conn, reset_global_conn
 )
@@ -324,7 +324,12 @@ def _gen_top20_ind(conn, años, filters):
             'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR', 'CIF_ITEM', 'CANT_MERC',
             'DESOBS1', 'DD', 'CODCOMUN', 'ADU', 'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN']
     try:
-        df = query_raw(columns=cols, filters=filters, limit=2000, conn=conn)
+        where_str = ' AND '.join(filters) if filters else None
+        df = query_parquet(
+            ", ".join([f'"{c}"' for c in cols]),
+            where_clause=where_str,
+            order_by=f'CAST("CIF_ITEM" AS DOUBLE) DESC',
+            limit=20, conn=conn)
         if df is not None and not df.empty:
             df = enriquecer_desde_diccionarios(df, ['CODCOMUN', 'ADU', 'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN'])
             df['NUM_UNICO_IMPORTADOR'] = df['NUM_UNICO_IMPORTADOR'].astype(str).map(import_dict).fillna(df['NUM_UNICO_IMPORTADOR'].astype(str))
@@ -335,7 +340,7 @@ def _gen_top20_ind(conn, años, filters):
             df['PRODUCTO'] = product_parts[0]
             for p in product_parts[1:]:
                 df['PRODUCTO'] = df['PRODUCTO'] + ' ' + p
-            return df.nlargest(20, 'CIF_ITEM')[
+            return df[
                 ['PRODUCTO', 'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR',
                  'CIF_ITEM', 'CANT_MERC', 'DESOBS1', 'DD', 'CODCOMUN', 'ADU',
                  'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN']]
@@ -484,8 +489,9 @@ def _gen_port_analysis(conn, años, where_str):
 
 def _gen_importadores(conn, años, filters):
     try:
-        df = query_raw(columns=['NUM_UNICO_IMPORTADOR'], filters=filters, limit=50000, conn=conn)
+        df = query_distinct('NUM_UNICO_IMPORTADOR', filters, conn=conn, años=años)
         if df is not None and not df.empty:
+            df = df.dropna(subset=['NUM_UNICO_IMPORTADOR'])
             df['NUM_UNICO_IMPORTADOR_ORIGINAL'] = df['NUM_UNICO_IMPORTADOR']
             df['NUM_UNICO_IMPORTADOR'] = df['NUM_UNICO_IMPORTADOR'].apply(lambda x: import_dict.get(str(x).strip(), x))
             return obtener_importadores_coincidentes(df)
@@ -903,7 +909,7 @@ def _run_gens(años, where_str, filters, column_dropdown, gen_keys):
         return {}
 
     results = {}
-    max_workers = min(len(gen_keys), 4)
+    max_workers = min(len(gen_keys), 2)
 
     def _run_one(key):
         func, args_fn = _GEN_CALLS[key]

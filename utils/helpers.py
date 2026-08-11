@@ -27,6 +27,40 @@ _DICT_MTIME = 0
 _PARQUET_CACHE = {}
 
 
+def _total_ram_gb():
+    """RAM física total en GB (ctypes, sin dependencias). Retorna 0 si no se puede obtener."""
+    try:
+        import ctypes
+        class _MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [('dwLength', ctypes.c_ulong),
+                        ('dwMemoryLoad', ctypes.c_ulong),
+                        ('ullTotalPhys', ctypes.c_ulonglong),
+                        ('ullAvailPhys', ctypes.c_ulonglong),
+                        ('ullTotalPageFile', ctypes.c_ulonglong),
+                        ('ullAvailPageFile', ctypes.c_ulonglong),
+                        ('ullTotalVirtual', ctypes.c_ulonglong),
+                        ('ullAvailVirtual', ctypes.c_ulonglong),
+                        ('ullAvailExtendedVirtual', ctypes.c_ulonglong)]
+        m = _MEMORYSTATUSEX()
+        m.dwLength = ctypes.sizeof(m)
+        ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(m))
+        return m.ullTotalPhys / (1024 ** 3)
+    except Exception:
+        return 0
+
+
+def _memory_limit_str():
+    """Límite de memoria DuckDB por conexión, adaptado a la RAM física (~35% de la total)."""
+    total = _total_ram_gb()
+    if total <= 0:
+        return '8GB'
+    limit_gb = max(1, int(total * 0.35))
+    return f'{limit_gb}GB'
+
+
+_MEMORY_LIMIT = _memory_limit_str()
+
+
 def listar_archivos_parquet(años):
     key = tuple(sorted(str(a) for a in años))
     if key in _PARQUET_CACHE:
@@ -81,7 +115,7 @@ def _attach_years(conn, años):
 
 def _create_conn(años=None):
     conn = duckdb.connect()
-    conn.execute("PRAGMA memory_limit='8GB'")
+    conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
     conn.execute("PRAGMA threads=4")
     if años:
         _attach_years(conn, años)
@@ -151,6 +185,12 @@ def query_raw(columns=None, filters=None, limit=None, conn=None, años=None):
     select_str = ', '.join(selects)
     where_str = ' AND '.join(filters) if filters else None
     return query_parquet(select_str, where_clause=where_str, limit=limit, conn=conn, años=años)
+
+
+def query_distinct(column, filters=None, conn=None, años=None):
+    where_str = ' AND '.join(filters) if filters else None
+    return query_parquet(f'DISTINCT "{column}" AS "{column}"',
+                         where_clause=where_str, conn=conn, años=años)
 
 
 def query_count(años, filters=None):
