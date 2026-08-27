@@ -344,9 +344,14 @@ def _gen_top20_ind(conn, años, filters):
                 ['PRODUCTO', 'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR',
                  'CIF_ITEM', 'CANT_MERC', 'DESOBS1', 'DD', 'CODCOMUN', 'ADU',
                  'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN']]
+        return pd.DataFrame(columns=['PRODUCTO', 'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR',
+                  'CIF_ITEM', 'CANT_MERC', 'DESOBS1', 'DD', 'CODCOMUN', 'ADU',
+                  'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN'])
     except Exception:
         import traceback; traceback.print_exc()
-        return pd.DataFrame()
+        return pd.DataFrame(columns=['PRODUCTO', 'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR',
+                  'CIF_ITEM', 'CANT_MERC', 'DESOBS1', 'DD', 'CODCOMUN', 'ADU',
+                  'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN'])
 
 def _gen_avg_price_orig(conn, años, where_str):
     try:
@@ -354,11 +359,12 @@ def _gen_avg_price_orig(conn, años, where_str):
         df = query_parquet(
             f"CAST(\"PA_ORIG\" AS VARCHAR) AS PA_ORIG, SUM({_cif_expr}) AS CIF_ITEM, SUM({_cant_expr}) AS CANT_MERC",
             where_clause=w, group_by='"PA_ORIG"', conn=conn)
-        if not df.empty:
+        if df is not None and not df.empty:
             pp = df.copy()
             pp['Precio Promedio (CIF/Kg)'] = (pp['CIF_ITEM'] / pp['CANT_MERC'].replace(0, np.nan)).round(2)
             pp = enriquecer_desde_diccionarios(pp[['PA_ORIG', 'Precio Promedio (CIF/Kg)']], ['PA_ORIG'])
             return pp
+        return pd.DataFrame(columns=['PA_ORIG', 'Precio Promedio (CIF/Kg)'])
     except Exception:
         import traceback; traceback.print_exc()
         return pd.DataFrame(columns=['PA_ORIG', 'Precio Promedio (CIF/Kg)'])
@@ -369,11 +375,12 @@ def _gen_avg_price_adq(conn, años, where_str):
         df = query_parquet(
             f"CAST(\"PA_ADQ\" AS VARCHAR) AS PA_ADQ, SUM({_cif_expr}) AS CIF_ITEM, SUM({_cant_expr}) AS CANT_MERC",
             where_clause=w, group_by='"PA_ADQ"', conn=conn)
-        if not df.empty:
+        if df is not None and not df.empty:
             pp = df.copy()
             pp['Precio Promedio (CIF/Kg)'] = (pp['CIF_ITEM'] / pp['CANT_MERC'].replace(0, np.nan)).round(2)
             pp = enriquecer_desde_diccionarios(pp[['PA_ADQ', 'Precio Promedio (CIF/Kg)']], ['PA_ADQ'])
             return pp
+        return pd.DataFrame(columns=['PA_ADQ', 'Precio Promedio (CIF/Kg)'])
     except Exception:
         import traceback; traceback.print_exc()
         return pd.DataFrame(columns=['PA_ADQ', 'Precio Promedio (CIF/Kg)'])
@@ -495,6 +502,7 @@ def _gen_importadores(conn, años, filters):
             df['NUM_UNICO_IMPORTADOR_ORIGINAL'] = df['NUM_UNICO_IMPORTADOR']
             df['NUM_UNICO_IMPORTADOR'] = df['NUM_UNICO_IMPORTADOR'].apply(lambda x: import_dict.get(str(x).strip(), x))
             return obtener_importadores_coincidentes(df)
+        return pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO'])
     except Exception:
         import traceback; traceback.print_exc()
         return pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO'])
@@ -940,15 +948,30 @@ def _run_gens(años, where_str, filters, column_dropdown, gen_keys):
             except Exception:
                 pass
 
+    _FALLBACKS = {
+        'importadores': lambda: pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO']),
+        'top20_ind': lambda: pd.DataFrame(columns=['PRODUCTO', 'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR', 'CIF_ITEM', 'CANT_MERC', 'DESOBS1', 'DD', 'CODCOMUN', 'ADU', 'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN']),
+        'avg_price_analysis': lambda: (pd.DataFrame(columns=['PA_ORIG', 'Precio Promedio (CIF/Kg)']), pd.DataFrame(columns=['PA_ADQ', 'Precio Promedio (CIF/Kg)'])),
+        'top20_analysis': lambda: (_empty_fig(), pd.DataFrame(columns=['PRODUCTO', 'Conteo']), _empty_fig(), pd.DataFrame(columns=['PRODUCTO', 'Total_CIF'])),
+        'port_analysis': lambda: (_empty_fig(), _empty_fig(), _empty_fig()),
+        'country_analysis': lambda: (_empty_fig(), _empty_fig()),
+        'heat_analysis': lambda: (_empty_fig(), _empty_fig()),
+        'monthly': lambda: (_empty_fig(), _empty_fig(), _empty_fig(), pd.DataFrame()),
+        'ruts_coinc': lambda: 0,
+    }
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
         future_to_key = {pool.submit(_run_one, key): key for key in gen_keys}
         for future in as_completed(future_to_key):
             key = future_to_key[future]
             try:
                 _, result = future.result()
+                if result is None:
+                    result = _FALLBACKS.get(key, lambda: _error_fig(f'Vacio {key}'))()
                 results[key] = result
             except Exception:
-                results[key] = _error_fig(f'Error en {key}')
+                import traceback; traceback.print_exc()
+                fb = _FALLBACKS.get(key)
+                results[key] = fb() if fb else _error_fig(f'Error en {key}')
 
     return results
 
@@ -1038,9 +1061,11 @@ def _build_tab(tab_name, results):
     if tab_name == 'Tablas':
         _, top20, _, top20_trans = results['top20_analysis']
         pp_orig, pp_adq = results['avg_price_analysis']
+        _imp = results.get('importadores')
+        _imp_ok = _imp is not None and hasattr(_imp, 'empty') and not _imp.empty
         return html.Div([
             _card("Importadores Coincidentes",
-                  _data_table(results['importadores'], page_size=200) if not results['importadores'].empty
+                  _data_table(_imp, page_size=200) if _imp_ok
                   else html.P("No hay importadores coincidentes", style={'color': 'var(--danger)'})),
             _card("Top 20 Productos por Frecuencia (Completo)", _data_table(top20)),
             _card("Top 20 Productos por Valor CIF (Completo)", _data_table(top20_trans)),
