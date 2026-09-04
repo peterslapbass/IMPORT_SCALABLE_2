@@ -1237,14 +1237,24 @@ def register_callbacks(app):
         try:
             import subprocess, sys as _sys
             script = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'scripts', 'ingestar.py')
-            result = subprocess.run([_sys.executable, script], capture_output=True, text=True, timeout=600)
-            output = result.stdout.strip().split('\n')[-2:]
-            if result.returncode == 0:
+            import os as _os
+            creationflags = getattr(subprocess, 'CREATE_NO_WINDOW', 0)
+            proc = subprocess.Popen([_sys.executable, "-u", script], stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, bufsize=1, creationflags=creationflags)
+            try:
+                stdout, _ = proc.communicate(timeout=600)
+            except subprocess.TimeoutExpired:
+                try:
+                    proc.kill()
+                    stdout, _ = proc.communicate(timeout=5)
+                except Exception:
+                    stdout = ""
+                return 'Error: tiempo excedido (10 min) - proceso terminado. Revisa que el dashboard no tenga la DB bloqueada.'
+            output = (stdout or "").strip().split('\n')[-2:]
+            if proc.returncode == 0:
+                reset_global_conn()
                 return f'OK: {output[-1]}' if output else 'Ingesta completada'
             else:
-                return f'Error: {result.stderr[:200]}'
-        except subprocess.TimeoutExpired:
-            return 'Error: tiempo excedido (10 min)'
+                return f'Error: {(stdout or "")[-400:]}'
         except Exception as e:
             return f'Error: {e}'
 

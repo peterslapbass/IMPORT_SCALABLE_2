@@ -38,116 +38,168 @@ def procesar_año(año, check_only=False):
             return len(files), 0
         print(f'  [{año}] Creando base nueva...')
         conn = duckdb.connect(db)
-        conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
-        conn.execute("PRAGMA threads=4")
-        col_defs = [f'"{c}" DOUBLE' if c in COLUMNAS_DECIMALES else f'"{c}" VARCHAR' for c in columnas]
-        conn.execute(f'CREATE TABLE importaciones ({", ".join(col_defs)})')
-        conn.execute("""
-            CREATE TABLE _fuentes (
-                archivo VARCHAR PRIMARY KEY, mtime DOUBLE,
-                filas INTEGER, procesado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        """)
+        try:
+            conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
+            conn.execute("PRAGMA threads=2")
+            col_defs = [f'"{c}" DOUBLE' if c in COLUMNAS_DECIMALES else f'"{c}" VARCHAR' for c in columnas]
+            conn.execute(f'CREATE TABLE importaciones ({", ".join(col_defs)})')
+            conn.execute("""
+                CREATE TABLE _fuentes (
+                    archivo VARCHAR PRIMARY KEY, mtime DOUBLE,
+                    filas INTEGER, procesado TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                )
+            """)
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+            raise
     else:
         conn = duckdb.connect(db)
-        conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
-        conn.execute("PRAGMA threads=4")
-        procesados = set(conn.execute("SELECT archivo FROM _fuentes").fetchdf()['archivo'])
+        try:
+            conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
+            conn.execute("PRAGMA threads=2")
+        except Exception:
+            pass
 
     nuevos = 0
     omitidos = 0
 
-    for fpath in files:
-        fname = os.path.basename(fpath)
-        mtime = os.path.getmtime(fpath)
-
+    try:
         if not crear_db:
-            row = conn.execute(
-                "SELECT mtime FROM _fuentes WHERE archivo=?", [fname]
-            ).fetchone()
-            if row and row[0] >= mtime:
+            try:
+                procesados = set(conn.execute("SELECT archivo FROM _fuentes").fetchdf()['archivo'])
+            except Exception:
+                procesados = set()
+
+        for fpath in files:
+            fname = os.path.basename(fpath)
+            try:
+                mtime = os.path.getmtime(fpath)
+            except Exception:
+                print(f'    {fname} (no accesible, omitido)')
                 omitidos += 1
                 continue
 
-        if check_only:
-            if not crear_db and (not row or row[0] < mtime):
-                print(f'    {fname} (desactualizado)')
-            continue
+            if not crear_db:
+                try:
+                    row = conn.execute(
+                        "SELECT mtime FROM _fuentes WHERE archivo=?", [fname]
+                    ).fetchone()
+                except Exception:
+                    row = None
+                if row and row[0] >= mtime:
+                    omitidos += 1
+                    continue
 
-        f_abs = os.path.abspath(fpath).replace('\\', '/')
-        col_names = conn.execute(
-            "SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet(?))",
-            [f_abs]
-        ).fetchdf()['column_name'].tolist()
+            if check_only:
+                if not crear_db and (not row or row[0] < mtime):
+                    print(f'    {fname} (desactualizado)')
+                continue
 
-        ncols = min(len(col_names), ncols_din)
-        selects = []
-        insert_cols = []
-        for i in range(ncols):
-            din_col = columnas[i]
-            raw_name = col_names[i].replace('"', '""')
-            ref = f'"{raw_name}"'
-            insert_cols.append(f'"{din_col}"')
+            f_abs = os.path.abspath(fpath).replace('\\', '/')
 
-            if din_col in COLUMNAS_DECIMALES:
-                selects.append(f"CAST(REPLACE(CAST({ref} AS VARCHAR), ',', '.') AS DOUBLE) AS \"{din_col}\"")
-            elif din_col == 'DD':
-                selects.append(
-                    f"CASE WHEN LENGTH(LPAD(CAST({ref} AS VARCHAR), 8, '0')) = 8 "
-                    f"AND TRY_CAST(LPAD(CAST({ref} AS VARCHAR), 8, '0') AS INTEGER) IS NOT NULL "
-                    f"AND LPAD(CAST({ref} AS VARCHAR), 8, '0') != '00000000' "
-                    f"THEN LPAD(CAST({ref} AS VARCHAR), 8, '0') END AS \"{din_col}\""
-                )
-            else:
-                selects.append(f'CAST({ref} AS VARCHAR) AS "{din_col}"')
-
-        path_sql = f_abs.replace("'", "''")
-
-        if not crear_db and 'DD' in columnas:
-            dd_idx = columnas.index('DD')
-            if dd_idx < len(col_names):
-                dd_raw = col_names[dd_idx].replace('"', '""')
-                dd_expr = f'LPAD(CAST("{dd_raw}" AS VARCHAR), 8, \'0\')'
-                conn.execute(f"""
-                    DELETE FROM importaciones WHERE DD IN (
-                        SELECT CASE WHEN LENGTH({dd_expr}) = 8
-                             AND TRY_CAST({dd_expr} AS INTEGER) IS NOT NULL
-                             AND {dd_expr} != '00000000'
-                             THEN {dd_expr} END
-                        FROM read_parquet('{path_sql}')
-                    )
-                """)
-
-        sql = f'INSERT INTO importaciones ({", ".join(insert_cols)}) SELECT {", ".join(selects)} FROM read_parquet(\'{path_sql}\')'
-        conn.execute(sql)
-
-        total_rows = conn.execute("SELECT COUNT(*) FROM importaciones").fetchone()[0]
-        conn.execute(
-            "INSERT OR REPLACE INTO _fuentes (archivo, mtime, filas, procesado) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
-            [fname, mtime, total_rows]
-        )
-        nuevos += 1
-        print(f'    {fname}')
-
-    if nuevos > 0 and not check_only:
-        conn.execute("ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS ANO INTEGER")
-        conn.execute("""
-            UPDATE importaciones SET ANO = TRY_CAST(SUBSTR(DD, 5, 4) AS INTEGER)
-            WHERE DD IS NOT NULL AND LENGTH(DD) = 8 AND ANO IS NULL
-        """)
-        for idx_name, col in [
-            ('idx_aranc', 'ARANC_NAC'), ('idx_orig', 'PA_ORIG'), ('idx_adq', 'PA_ADQ'),
-            ('idx_importador', 'NUM_UNICO_IMPORTADOR'), ('idx_dd', 'DD'),
-            ('idx_comuna', 'CODCOMUN'), ('idx_via_tran', 'VIA_TRAN'),
-            ('idx_adu', 'ADU'), ('idx_ano', 'ANO'),
-        ]:
             try:
-                conn.execute(f'CREATE INDEX IF NOT EXISTS {idx_name} ON importaciones ("{col}")')
+                col_names = conn.execute(
+                    "SELECT column_name FROM (DESCRIBE SELECT * FROM read_parquet(?))",
+                    [f_abs]
+                ).fetchdf()['column_name'].tolist()
+            except Exception as e:
+                print(f'    {fname} (error describe: {e})')
+                continue
+
+            ncols = min(len(col_names), ncols_din)
+            selects = []
+            insert_cols = []
+            for i in range(ncols):
+                din_col = columnas[i]
+                raw_name = col_names[i].replace('"', '""')
+                ref = f'"{raw_name}"'
+                insert_cols.append(f'"{din_col}"')
+                if din_col in COLUMNAS_DECIMALES:
+                    selects.append(f"CAST(REPLACE(CAST({ref} AS VARCHAR), ',', '.') AS DOUBLE) AS \"{din_col}\"")
+                elif din_col == 'DD':
+                    selects.append(
+                        f"CASE WHEN LENGTH(LPAD(CAST({ref} AS VARCHAR), 8, '0')) = 8 "
+                        f"AND TRY_CAST(LPAD(CAST({ref} AS VARCHAR), 8, '0') AS INTEGER) IS NOT NULL "
+                        f"AND LPAD(CAST({ref} AS VARCHAR), 8, '0') != '00000000' "
+                        f"THEN LPAD(CAST({ref} AS VARCHAR), 8, '0') END AS \"{din_col}\""
+                    )
+                else:
+                    selects.append(f'CAST({ref} AS VARCHAR) AS "{din_col}"')
+
+            if not crear_db and 'DD' in columnas:
+                dd_idx = columnas.index('DD')
+                if dd_idx < len(col_names):
+                    dd_raw = col_names[dd_idx].replace('"', '""')
+                    dd_expr = f'LPAD(CAST("{dd_raw}" AS VARCHAR), 8, \'0\')'
+                    try:
+                        conn.execute(
+                            "DELETE FROM importaciones WHERE DD IN (SELECT CASE WHEN LENGTH(t.dd)=8 AND TRY_CAST(t.dd AS INTEGER) IS NOT NULL AND t.dd != '00000000' THEN t.dd END FROM (SELECT " + dd_expr + " AS dd FROM read_parquet(?)) t)",
+                            [f_abs]
+                        )
+                    except Exception as e:
+                        print(f'    {fname} (warn delete: {e})')
+
+            try:
+                conn.execute(
+                    f'INSERT INTO importaciones ({", ".join(insert_cols)}) SELECT {", ".join(selects)} FROM read_parquet(?)',
+                    [f_abs]
+                )
+            except Exception as e:
+                print(f'    {fname} (error insert: {e})')
+                continue
+
+            try:
+                filas = conn.execute("SELECT COUNT(*) FROM read_parquet(?)", [f_abs]).fetchone()[0]
+            except Exception:
+                filas = 0
+            try:
+                conn.execute(
+                    "INSERT OR REPLACE INTO _fuentes (archivo, mtime, filas, procesado) VALUES (?, ?, ?, CURRENT_TIMESTAMP)",
+                    [fname, mtime, filas]
+                )
             except Exception:
                 pass
-        conn.execute("ANALYZE")
+            nuevos += 1
+            print(f'    {fname}', flush=True)
 
-    conn.close()
+        if nuevos > 0 and not check_only:
+            conn.execute("ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS ANO INTEGER")
+            conn.execute("""
+                UPDATE importaciones SET ANO = TRY_CAST(SUBSTR(DD, 5, 4) AS INTEGER)
+                WHERE DD IS NOT NULL AND LENGTH(DD) = 8 AND ANO IS NULL
+            """)
+            for idx_name, col in [
+                ('idx_aranc', 'ARANC_NAC'), ('idx_orig', 'PA_ORIG'), ('idx_adq', 'PA_ADQ'),
+                ('idx_importador', 'NUM_UNICO_IMPORTADOR'), ('idx_dd', 'DD'),
+                ('idx_comuna', 'CODCOMUN'), ('idx_via_tran', 'VIA_TRAN'),
+                ('idx_adu', 'ADU'), ('idx_ano', 'ANO'),
+            ]:
+                try:
+                    conn.execute(f'CREATE INDEX IF NOT EXISTS {idx_name} ON importaciones ("{col}")')
+                except Exception:
+                    pass
+            try:
+                conn.execute("CHECKPOINT")
+            except Exception:
+                pass
+            try:
+                conn.execute("ANALYZE")
+            except Exception:
+                pass
+
+    finally:
+        try:
+            conn.execute("CHECKPOINT")
+        except Exception:
+            pass
+        try:
+            conn.close()
+        except Exception:
+            pass
+
     return nuevos, omitidos
 
 
