@@ -118,17 +118,9 @@ def _build_filter_sql(primary_aranc, primary_importador,
     filters = []
     if primary_aranc:
         terms = [t.strip() for t in primary_aranc.split(',')]
-        conds = []
-        for t in terms:
-            if not t:
-                continue
-            if ENABLE_PARTITION and t.isdigit() and len(t) >= 2:
-                chapter = t[:2]
-                conds.append(f'(COALESCE("Chapter", SUBSTR("ARANC_NAC",1,2)) = \'{chapter}\' AND "ARANC_NAC" ILIKE \'{t}%\')')
-            else:
-                conds.append(f'"ARANC_NAC" ILIKE \'{t}%\'')
-        if conds:
-            filters.append('(' + ' OR '.join(conds) + ')')
+        term_conds = [f'"ARANC_NAC" ILIKE \'{t}%\'' for t in terms if t]
+        if term_conds:
+            filters.append('(' + ' OR '.join(term_conds) + ')')
     if primary_importador:
         terms = [t.strip() for t in primary_importador.split(',')]
         term_conds = [f'"NUM_UNICO_IMPORTADOR" ILIKE \'%{t}%\'' for t in terms if t]
@@ -142,15 +134,10 @@ def _build_filter_sql(primary_aranc, primary_importador,
         )
     if search_producto:
         terms = [t.strip() for t in search_producto.split(',')]
-        if ENABLE_PARTITION:
-            for term in terms:
-                if term:
-                    filters.append(f'COALESCE("producto_concat", {_product_expr}) ILIKE \'%{term}%\'')
-        else:
-            product_cols = ['"DNOMBRE"', '"DMARCA"', '"DVARIEDAD"', '"DOTRO1"', '"DOTRO2"', '"ATR_5"', '"ATR_6"']
-            for term in terms:
-                col_conditions = [f"{col} ILIKE '%{term}%'" for col in product_cols]
-                filters.append('(' + ' OR '.join(col_conditions) + ')')
+        product_cols = ['"DNOMBRE"', '"DMARCA"', '"DVARIEDAD"', '"DOTRO1"', '"DOTRO2"', '"ATR_5"', '"ATR_6"']
+        for term in terms:
+            col_conditions = [f"{col} ILIKE '%{term}%'" for col in product_cols]
+            filters.append('(' + ' OR '.join(col_conditions) + ')')
     if search_importador:
         terms = [t.strip() for t in search_importador.split(',')]
         term_conditions = [f'"NUM_UNICO_IMPORTADOR" ILIKE \'%{t}%\'' for t in terms if t]
