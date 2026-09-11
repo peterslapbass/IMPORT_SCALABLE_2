@@ -10,6 +10,7 @@ DESCRIPCION_PATH = os.path.join('data', 'descripcion-y-estructura-de-datos.xlsx'
 DESCRIPCION_SHEET = 'DIN'
 
 _DB_BASE = os.path.join('data', 'importaciones_{}.db')
+ENABLE_PARTITION = os.getenv("ENABLE_PARTITION", "1") == "1"
 
 COLUMNAS_DECIMALES = {'CIF_ITEM', 'CANT_MERC', 'FOB', 'FLETE', 'SEGURO', 'CIF',
                       'PRE_UNIT', 'ADVAL_ALA', 'ADVAL', 'VALAD', 'VAL1', 'VAL2', 'VAL3', 'VAL4'}
@@ -129,7 +130,12 @@ def query_parquet(selects, where_clause=None, group_by=None, order_by=None, limi
             return pd.DataFrame()
         conn = _create_conn(años)
     try:
-        sql = f"SELECT {selects} FROM todas"
+        try:
+            conn.execute("SELECT 1 FROM _filt LIMIT 1")
+            base = "_filt"
+        except Exception:
+            base = "todas"
+        sql = f"SELECT {selects} FROM {base}"
         if where_clause:
             sql += f" WHERE {where_clause}"
         if group_by:
@@ -142,6 +148,19 @@ def query_parquet(selects, where_clause=None, group_by=None, order_by=None, limi
     finally:
         if own_conn:
             conn.close()
+
+
+def _create_filtered_conn(años, filters):
+    conn = _create_conn(años)
+    if ENABLE_PARTITION and filters:
+        where_str = ' AND '.join(filters)
+        try:
+            conn.execute(f"CREATE OR REPLACE TEMP TABLE _filt AS SELECT * FROM todas WHERE {where_str}")
+        except Exception:
+            pass
+        else:
+            return conn
+    return conn
 
 
 def query_aggregated(metric_col, group_cols, filters=None, extra_selects=None, conn=None, años=None):

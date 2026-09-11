@@ -115,12 +115,21 @@ def _build_filter_sql(primary_aranc, primary_importador,
                       end_day, end_month, end_year,
                       search_producto, search_importador,
                       search_pa_orig, search_pa_adq, search_comuna):
+    from utils.helpers import ENABLE_PARTITION
     filters = []
     if primary_aranc:
         terms = [t.strip() for t in primary_aranc.split(',')]
-        term_conds = [f'"ARANC_NAC" ILIKE \'{t}%\'' for t in terms if t]
-        if term_conds:
-            filters.append('(' + ' OR '.join(term_conds) + ')')
+        conds = []
+        for t in terms:
+            if not t:
+                continue
+            if ENABLE_PARTITION and t.isdigit() and len(t) >= 2:
+                chapter = t[:2]
+                conds.append(f'(COALESCE("Chapter", SUBSTR("ARANC_NAC",1,2)) = \'{chapter}\' AND "ARANC_NAC" ILIKE \'{t}%\')')
+            else:
+                conds.append(f'"ARANC_NAC" ILIKE \'{t}%\'')
+        if conds:
+            filters.append('(' + ' OR '.join(conds) + ')')
     if primary_importador:
         terms = [t.strip() for t in primary_importador.split(',')]
         term_conds = [f'"NUM_UNICO_IMPORTADOR" ILIKE \'%{t}%\'' for t in terms if t]
@@ -134,10 +143,15 @@ def _build_filter_sql(primary_aranc, primary_importador,
         )
     if search_producto:
         terms = [t.strip() for t in search_producto.split(',')]
-        product_cols = ['"DNOMBRE"', '"DMARCA"', '"DVARIEDAD"', '"DOTRO1"', '"DOTRO2"', '"ATR_5"', '"ATR_6"']
-        for term in terms:
-            col_conditions = [f"{col} ILIKE '%{term}%'" for col in product_cols]
-            filters.append('(' + ' OR '.join(col_conditions) + ')')
+        if ENABLE_PARTITION:
+            for term in terms:
+                if term:
+                    filters.append(f'COALESCE("producto_concat", {_product_expr}) ILIKE \'%{term}%\'')
+        else:
+            product_cols = ['"DNOMBRE"', '"DMARCA"', '"DVARIEDAD"', '"DOTRO1"', '"DOTRO2"', '"ATR_5"', '"ATR_6"']
+            for term in terms:
+                col_conditions = [f"{col} ILIKE '%{term}%'" for col in product_cols]
+                filters.append('(' + ' OR '.join(col_conditions) + ')')
     if search_importador:
         terms = [t.strip() for t in search_importador.split(',')]
         term_conditions = [f'"NUM_UNICO_IMPORTADOR" ILIKE \'%{t}%\'' for t in terms if t]
@@ -261,16 +275,18 @@ def _gen_country_orig(conn, años, filters):
 
 def _gen_pct_bar(conn, años, column_dropdown, filters):
     try:
-        df = query_aggregated('CIF_ITEM', [column_dropdown], filters, conn=conn)
-        if not df.empty:
+        where_parts = (filters or []) + [f'{_cif_expr} IS NOT NULL']
+        where_str = ' AND '.join(where_parts)
+        total_df = query_parquet(f"SUM({_cif_expr}) AS CIF_ITEM", where_clause=where_str, conn=conn)
+        total = float(total_df['CIF_ITEM'].iloc[0]) if total_df is not None and not total_df.empty and total_df['CIF_ITEM'].iloc[0] is not None else 0
+        df = query_parquet(f'CAST("{column_dropdown}" AS VARCHAR) AS "{column_dropdown}", SUM({_cif_expr}) AS CIF_ITEM', where_clause=where_str, group_by=f'"{column_dropdown}"', order_by='CIF_ITEM DESC', limit=30, conn=conn)
+        if df is not None and not df.empty:
             df = enriquecer_desde_diccionarios(df, [column_dropdown])
             if column_dropdown == 'NUM_UNICO_IMPORTADOR':
                 df[column_dropdown] = df[column_dropdown].astype(str).map(import_dict).fillna(df[column_dropdown].astype(str))
-            total = df['CIF_ITEM'].sum()
-            df['%'] = (df['CIF_ITEM'] / total * 100).round(2)
-            df = df.sort_values('CIF_ITEM', ascending=False)
+            df['%'] = (df['CIF_ITEM'] / total * 100).round(2) if total else 0
             fig = px.bar(df, x=column_dropdown, y='%',
-                         title=f'Porcentaje de CIF_ITEM por {column_dropdown}', template=None)
+                         title=f'Porcentaje de CIF_ITEM por {column_dropdown} (Top 30)', template=None)
             fig.update_layout(xaxis_tickangle=-45, xaxis=dict(automargin=True))
             return fig
     except Exception as e:
@@ -430,7 +446,7 @@ def _gen_mapa_comunas(conn, años, where_str):
             fig = px.scatter_mapbox(merged, lat='latitud', lon='longitud', hover_name='CODCOMUN',
                                     color='Total CIF_ITEM', size='Total CIF_ITEM',
                                     title='Mapa de Comunas', zoom=4, height=800, template=None)
-            fig.update_layout(mapbox_style="carto-positron")
+            fig.update_layout(mapbox_style="open-street-map")
             return fig
     except Exception as e:
         return _error_fig(e)
@@ -461,7 +477,7 @@ def _gen_port_analysis(conn, años, where_str):
                                          hover_name='Puerto_x', size='CIF_ITEM', color='CIF_ITEM',
                                          title='Mapa de Puertos (volumen CIF)', zoom=5, height=800,
                                          center={'lat': -33.45, 'lon': -70.65}, template=None)
-            fig_mapa.update_layout(mapbox_style="carto-positron")
+            fig_mapa.update_layout(mapbox_style="open-street-map")
         else:
             fig_mapa = _empty_fig()
 
@@ -769,16 +785,19 @@ def _gen_cost_breakdown(conn, años, where_str):
 
 def _gen_importer_concentration(conn, años, filters):
     try:
-        df = query_aggregated('CIF_ITEM', ['NUM_UNICO_IMPORTADOR'], filters, conn=conn)
-        if not df.empty:
-            total = df['CIF_ITEM'].sum()
+        where_parts = (filters or []) + [f'{_cif_expr} IS NOT NULL']
+        where_str = ' AND '.join(where_parts)
+        total_df = query_parquet(f"SUM({_cif_expr}) AS CIF_ITEM", where_clause=where_str, conn=conn)
+        total = float(total_df['CIF_ITEM'].iloc[0]) if total_df is not None and not total_df.empty and total_df['CIF_ITEM'].iloc[0] is not None else 0
+        df = query_parquet(f'CAST("NUM_UNICO_IMPORTADOR" AS VARCHAR) AS "NUM_UNICO_IMPORTADOR", SUM({_cif_expr}) AS CIF_ITEM', where_clause=where_str, group_by='"NUM_UNICO_IMPORTADOR"', order_by='CIF_ITEM DESC', limit=30, conn=conn)
+        if df is not None and not df.empty:
             df = df.sort_values('CIF_ITEM', ascending=False)
-            df['% Acumulado'] = (df['CIF_ITEM'].cumsum() / total * 100).round(1)
-            df['% Individual'] = (df['CIF_ITEM'] / total * 100).round(1)
+            df['% Acumulado'] = (df['CIF_ITEM'].cumsum() / total * 100).round(1) if total else 0
+            df['% Individual'] = (df['CIF_ITEM'] / total * 100).round(1) if total else 0
             top10 = df.head(10).copy()
             top10['Importador'] = top10['NUM_UNICO_IMPORTADOR'].astype(str).map(import_dict).fillna(top10['NUM_UNICO_IMPORTADOR'].astype(str))
             fig = px.bar(top10, x='Importador', y='% Individual',
-                         title='Top 10 Importadores (% del CIF Total)',
+                         title='Top 10 Importadores (% del CIF Total) - Top 30 en base',
                          template=None, text='% Individual')
             fig.update_layout(xaxis_tickangle=-45, xaxis=dict(automargin=True))
             fig.update_traces(texttemplate='%{text}%', textposition='outside')
@@ -932,16 +951,67 @@ _grid = {'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'gap': '16px'}
 def _run_gens(años, where_str, filters, column_dropdown, gen_keys):
     if not gen_keys:
         return {}
+    from utils.helpers import _create_filtered_conn, ENABLE_PARTITION
+    if ENABLE_PARTITION and filters:
+        conn0 = _create_filtered_conn(años, filters)
+        try:
+            conn0.execute("SELECT 1 FROM _filt LIMIT 1")
+            has_filt = True
+        except Exception:
+            has_filt = False
+        if has_filt:
+            results = {}
+            for key in gen_keys:
+                import time as _tt
+                _ts = _tt.perf_counter()
+                func, args_fn = _GEN_CALLS[key]
+                extra = args_fn([], None, column_dropdown)
+                try:
+                    res = func(conn0, años, *extra)
+                except Exception:
+                    import traceback; traceback.print_exc()
+                    res = None
+                _el = _tt.perf_counter() - _ts
+                print(f"[perf-gen] {key} {_el:.2f}s (filt)", flush=True)
+                if res is None:
+                    from utils.helpers import _FALLBACKS as _FB
+                    pass
+                results[key] = res
+            try:
+                conn0.close()
+            except Exception:
+                pass
+            _FALLBACKS_LOCAL = {
+                'importadores': lambda: pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO']),
+                'top20_ind': lambda: pd.DataFrame(columns=['PRODUCTO', 'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR', 'CIF_ITEM', 'CANT_MERC', 'DESOBS1', 'DD', 'CODCOMUN', 'ADU', 'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN']),
+                'avg_price_analysis': lambda: (pd.DataFrame(columns=['PA_ORIG', 'Precio Promedio (CIF/Kg)']), pd.DataFrame(columns=['PA_ADQ', 'Precio Promedio (CIF/Kg)'])),
+                'top20_analysis': lambda: (_empty_fig(), pd.DataFrame(columns=['PRODUCTO', 'Conteo']), _empty_fig(), pd.DataFrame(columns=['PRODUCTO', 'Total_CIF'])),
+                'port_analysis': lambda: (_empty_fig(), _empty_fig(), _empty_fig()),
+                'country_analysis': lambda: (_empty_fig(), _empty_fig()),
+                'heat_analysis': lambda: (_empty_fig(), _empty_fig()),
+                'monthly': lambda: (_empty_fig(), _empty_fig(), _empty_fig(), pd.DataFrame()),
+                'ruts_coinc': lambda: 0,
+            }
+            for k in gen_keys:
+                if results.get(k) is None:
+                    fb = _FALLBACKS_LOCAL.get(k)
+                    results[k] = fb() if fb else _error_fig(f'Vacio {k}')
+            return results
 
     results = {}
     max_workers = min(len(gen_keys), 2)
 
     def _run_one(key):
+        import time as _tt
+        _ts = _tt.perf_counter()
         func, args_fn = _GEN_CALLS[key]
         extra = args_fn(filters, where_str, column_dropdown)
         conn = _create_conn(años)
         try:
-            return key, func(conn, años, *extra)
+            res = func(conn, años, *extra)
+            _el = _tt.perf_counter() - _ts
+            print(f"[perf-gen] {key} {_el:.2f}s", flush=True)
+            return key, res
         finally:
             try:
                 conn.close()
@@ -1416,9 +1486,13 @@ def register_callbacks(app):
         filters = _apply_drill_filter(filters, drill_data)
         where_str = ' AND '.join(filters) if filters else None
 
+        import time as _t
+        _t0 = _t.perf_counter()
         gen_keys = _TAB_GENS.get(active_tab, [])
         results = _run_gens(selected_years, where_str, filters, column_dropdown, gen_keys)
         content = _build_tab(active_tab, results)
+        _elapsed = _t.perf_counter() - _t0
+        print(f"[perf] tab={active_tab} años={selected_years} gens={','.join(gen_keys)} tiempo={_elapsed:.2f}s", flush=True)
 
         with _TAB_CACHE_LOCK:
             _TAB_CACHE[active_tab] = (cur_key, content)
