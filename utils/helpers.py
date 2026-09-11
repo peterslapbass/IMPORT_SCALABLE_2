@@ -366,12 +366,28 @@ def eliminar_acentos(texto):
         texto = unicodedata.normalize('NFKD', texto).encode('ASCII', 'ignore').decode('utf-8')
     return texto
 
-import_df = pd.read_csv(os.path.join('data', 'import.txt'), sep='\t', encoding='utf-8')
-import_df['RUT'] = import_df['RUT'].astype(str).str.strip()
-import_dict = dict(zip(import_df['RUT'], import_df['RAZON_SOCIAL']))
-import_ruts_set = set(import_df['RUT'].values)
+_import_mtime = 0
+_import_cache_dict = {}
+_import_cache_set = set()
+def _ensure_import_loaded():
+    global _import_mtime
+    try:
+        mtime = os.path.getmtime(os.path.join('data', 'import.txt'))
+    except Exception:
+        mtime = 0
+    if mtime != _import_mtime or len(_import_cache_dict) == 0:
+        df = pd.read_csv(os.path.join('data', 'import.txt'), sep='\t', encoding='utf-8', usecols=['RUT', 'RAZON_SOCIAL'], dtype={'RUT': str, 'RAZON_SOCIAL': str})
+        df['RUT'] = df['RUT'].astype(str).str.strip()
+        _import_cache_dict.clear()
+        _import_cache_dict.update(dict(zip(df['RUT'], df['RAZON_SOCIAL'])))
+        _import_cache_set.clear()
+        _import_cache_set.update(set(df['RUT'].values))
+        globals()['_import_mtime'] = mtime
+import_dict = _import_cache_dict
+import_ruts_set = _import_cache_set
 
 def obtener_importadores_coincidentes(df_data):
+    _ensure_import_loaded()
     if 'NUM_UNICO_IMPORTADOR_ORIGINAL' not in df_data.columns:
         return pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO'])
     ruts_originales = df_data['NUM_UNICO_IMPORTADOR_ORIGINAL'].astype(str).str.strip().unique()

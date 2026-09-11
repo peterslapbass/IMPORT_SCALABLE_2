@@ -121,10 +121,6 @@ for año, files in sorted(archivos_por_año.items()):
         "UPDATE importaciones SET ANO = TRY_CAST(SUBSTR(DD, 5, 4) AS INTEGER) "
         "WHERE DD IS NOT NULL AND LENGTH(DD) = 8 AND ANO IS NULL"
     )
-    conn.execute("ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS Chapter VARCHAR")
-    conn.execute("UPDATE importaciones SET Chapter = SUBSTR(ARANC_NAC,1,2) WHERE Chapter IS NULL AND ARANC_NAC IS NOT NULL")
-    conn.execute("ALTER TABLE importaciones ADD COLUMN IF NOT EXISTS producto_concat VARCHAR")
-    conn.execute("UPDATE importaciones SET producto_concat = CONCAT(COALESCE(DNOMBRE,''),' ',COALESCE(DMARCA,''),' ',COALESCE(DVARIEDAD,''),' ',COALESCE(DOTRO1,''),' ',COALESCE(DOTRO2,''),' ',COALESCE(ATR_5,''),' ',COALESCE(ATR_6,'')) WHERE producto_concat IS NULL")
 
     # Índices
     for idx_name, col in [
@@ -132,13 +128,9 @@ for año, files in sorted(archivos_por_año.items()):
         ('idx_adq', 'PA_ADQ'), ('idx_importador', 'NUM_UNICO_IMPORTADOR'),
         ('idx_dd', 'DD'), ('idx_comuna', 'CODCOMUN'),
         ('idx_via_tran', 'VIA_TRAN'), ('idx_adu', 'ADU'), ('idx_ano', 'ANO'),
-        ('idx_chapter', 'Chapter'), ('idx_prod_concat', 'producto_concat'), ('idx_chapter_aranc', 'Chapter'),
     ]:
         try:
-            if idx_name == 'idx_chapter_aranc':
-                conn.execute(f'CREATE INDEX IF NOT EXISTS {idx_name} ON importaciones ("Chapter", "ARANC_NAC")')
-            else:
-                conn.execute(f'CREATE INDEX IF NOT EXISTS {idx_name} ON importaciones ("{col}")')
+            conn.execute(f'CREATE INDEX IF NOT EXISTS {idx_name} ON importaciones ("{col}")')
         except Exception:
             pass
 

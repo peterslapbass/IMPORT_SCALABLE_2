@@ -12,7 +12,7 @@ from utils.helpers import (
     leer_txt_sin_encabezado, obtener_importadores_coincidentes,
     obtener_metadata_parquet, query_aggregated, query_raw, query_parquet, query_distinct,
     enriquecer_desde_diccionarios, listar_archivos_parquet, _create_conn, _attach_years,
-    buscar_codigos_columna, get_global_conn, reset_global_conn
+    buscar_codigos_columna, get_global_conn, reset_global_conn, _ensure_import_loaded
 )
 from io import StringIO
 from dash.exceptions import PreventUpdate
@@ -261,6 +261,8 @@ def _gen_country_orig(conn, años, filters):
 
 def _gen_pct_bar(conn, años, column_dropdown, filters):
     try:
+        if column_dropdown == 'NUM_UNICO_IMPORTADOR':
+            _ensure_import_loaded()
         where_parts = (filters or []) + [f'{_cif_expr} IS NOT NULL']
         where_str = ' AND '.join(where_parts)
         total_df = query_parquet(f"SUM({_cif_expr}) AS CIF_ITEM", where_clause=where_str, conn=conn)
@@ -498,6 +500,7 @@ def _gen_port_analysis(conn, años, where_str):
 
 def _gen_importadores(conn, años, filters):
     try:
+        _ensure_import_loaded()
         df = query_distinct('NUM_UNICO_IMPORTADOR', filters, conn=conn, años=años)
         if df is not None and not df.empty:
             df = df.dropna(subset=['NUM_UNICO_IMPORTADOR'])
@@ -512,6 +515,7 @@ def _gen_importadores(conn, años, filters):
 
 def _gen_ruts_coincidentes(conn, años, filters):
     try:
+        _ensure_import_loaded()
         where_sql = ' AND '.join(filters) if filters else None
         sql = 'SELECT DISTINCT CAST("NUM_UNICO_IMPORTADOR" AS VARCHAR) AS r FROM todas'
         if where_sql:
@@ -771,6 +775,7 @@ def _gen_cost_breakdown(conn, años, where_str):
 
 def _gen_importer_concentration(conn, años, filters):
     try:
+        _ensure_import_loaded()
         where_parts = (filters or []) + [f'{_cif_expr} IS NOT NULL']
         where_str = ' AND '.join(where_parts)
         total_df = query_parquet(f"SUM({_cif_expr}) AS CIF_ITEM", where_clause=where_str, conn=conn)
