@@ -115,7 +115,6 @@ def _build_filter_sql(primary_aranc, primary_importador,
                       end_day, end_month, end_year,
                       search_producto, search_importador,
                       search_pa_orig, search_pa_adq, search_comuna):
-    from utils.helpers import ENABLE_PARTITION
     filters = []
     if primary_aranc:
         terms = [t.strip() for t in primary_aranc.split(',')]
