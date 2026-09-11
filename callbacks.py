@@ -526,13 +526,8 @@ def _gen_importadores(conn, años, filters):
 
 def _gen_ruts_coincidentes(conn, años, filters):
     try:
-        try:
-            conn.execute("SELECT 1 FROM _filt LIMIT 1")
-            base = "_filt"
-        except Exception:
-            base = "todas"
         where_sql = ' AND '.join(filters) if filters else None
-        sql = f'SELECT DISTINCT CAST("NUM_UNICO_IMPORTADOR" AS VARCHAR) AS r FROM {base}'
+        sql = 'SELECT DISTINCT CAST("NUM_UNICO_IMPORTADOR" AS VARCHAR) AS r FROM todas'
         if where_sql:
             sql += f' WHERE {where_sql}'
         df = conn.execute(sql).fetchdf()
@@ -956,53 +951,6 @@ _grid = {'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'gap': '16px'}
 def _run_gens(años, where_str, filters, column_dropdown, gen_keys):
     if not gen_keys:
         return {}
-    from utils.helpers import _create_filtered_conn, ENABLE_PARTITION
-    if ENABLE_PARTITION and filters:
-        conn0 = _create_filtered_conn(años, filters)
-        try:
-            conn0.execute("SELECT 1 FROM _filt LIMIT 1")
-            has_filt = True
-        except Exception:
-            has_filt = False
-        if has_filt:
-            results = {}
-            for key in gen_keys:
-                import time as _tt
-                _ts = _tt.perf_counter()
-                func, args_fn = _GEN_CALLS[key]
-                extra = args_fn([], None, column_dropdown)
-                try:
-                    res = func(conn0, años, *extra)
-                except Exception:
-                    import traceback; traceback.print_exc()
-                    res = None
-                _el = _tt.perf_counter() - _ts
-                print(f"[perf-gen] {key} {_el:.2f}s (filt)", flush=True)
-                if res is None:
-                    from utils.helpers import _FALLBACKS as _FB
-                    pass
-                results[key] = res
-            try:
-                conn0.close()
-            except Exception:
-                pass
-            _FALLBACKS_LOCAL = {
-                'importadores': lambda: pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO']),
-                'top20_ind': lambda: pd.DataFrame(columns=['PRODUCTO', 'TPO_DOCTO', 'ARANC_NAC', 'NUM_UNICO_IMPORTADOR', 'CIF_ITEM', 'CANT_MERC', 'DESOBS1', 'DD', 'CODCOMUN', 'ADU', 'PTO_DESEM', 'PTO_EMB', 'VIA_TRAN']),
-                'avg_price_analysis': lambda: (pd.DataFrame(columns=['PA_ORIG', 'Precio Promedio (CIF/Kg)']), pd.DataFrame(columns=['PA_ADQ', 'Precio Promedio (CIF/Kg)'])),
-                'top20_analysis': lambda: (_empty_fig(), pd.DataFrame(columns=['PRODUCTO', 'Conteo']), _empty_fig(), pd.DataFrame(columns=['PRODUCTO', 'Total_CIF'])),
-                'port_analysis': lambda: (_empty_fig(), _empty_fig(), _empty_fig()),
-                'country_analysis': lambda: (_empty_fig(), _empty_fig()),
-                'heat_analysis': lambda: (_empty_fig(), _empty_fig()),
-                'monthly': lambda: (_empty_fig(), _empty_fig(), _empty_fig(), pd.DataFrame()),
-                'ruts_coinc': lambda: 0,
-            }
-            for k in gen_keys:
-                if results.get(k) is None:
-                    fb = _FALLBACKS_LOCAL.get(k)
-                    results[k] = fb() if fb else _error_fig(f'Vacio {k}')
-            return results
-
     results = {}
     max_workers = min(len(gen_keys), 2)
 
