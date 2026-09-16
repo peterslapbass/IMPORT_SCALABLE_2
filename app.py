@@ -42,8 +42,27 @@ callbacks.register_callbacks(app)
 def run_server():
     app.run(debug=False, use_reloader=False)
 
+
+def _warm_caches():
+    try:
+        from utils.helpers import _ensure_import_loaded
+        _ensure_import_loaded()
+    except Exception:
+        pass
+    try:
+        import pandas as pd
+        import plotly.express as px
+        _df = pd.DataFrame({'x': [1, 2], 'y': [1, 2]})
+        px.area(_df, x='x', y='y', template=None)
+        px.line(_df, x='x', y='y', template=None)
+        px.bar(_df, x='x', y='y', template=None)
+        del _df
+    except Exception:
+        pass
+
 if __name__ == '__main__':
     if '--browser' in sys.argv:
+        threading.Thread(target=_warm_caches, daemon=True).start()
         run_server()
     else:
         import urllib.request
@@ -60,6 +79,7 @@ if __name__ == '__main__':
             except:
                 time.sleep(0.5)
 
-        webview.create_window("ImportRealMod", "http://127.0.0.1:8050",
+        threading.Thread(target=_warm_caches, daemon=True).start()
+        main_window = webview.create_window("ImportRealMod", "http://127.0.0.1:8050",
                                maximized=True)
         webview.start(gui='edgechromium')

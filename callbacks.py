@@ -12,12 +12,68 @@ from utils.helpers import (
     leer_txt_sin_encabezado, obtener_importadores_coincidentes,
     obtener_metadata_parquet, query_aggregated, query_raw, query_parquet, query_distinct,
     enriquecer_desde_diccionarios, listar_archivos_parquet, _create_conn, _attach_years,
-    buscar_codigos_columna, get_global_conn, reset_global_conn, _ensure_import_loaded
+    buscar_codigos_columna, get_global_conn, reset_global_conn, _ensure_import_loaded,
+    _get_worker_conn
 )
 from io import StringIO
 from dash.exceptions import PreventUpdate
+import sys as _sys
 import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
+
+_IS_DESKTOP = '--browser' not in _sys.argv
+
+
+def _desktop_save_path(default_name):
+    try:
+        import webview as _wv
+        windows = getattr(_wv, 'windows', None) or []
+        if not windows:
+            return None
+        save_kind = getattr(getattr(_wv, 'FileDialog', None), 'SAVE', None)
+        if save_kind is None:
+            save_kind = getattr(_wv, 'SAVE_DIALOG', None)
+        result = windows[0].create_file_dialog(
+            save_kind,
+            save_filename=default_name,
+        )
+        if isinstance(result, (list, tuple)):
+            return result[0] if result else None
+        return result
+    except Exception:
+        return None
+
+
+def _fallback_export_path(default_name):
+    import datetime as _dt
+    export_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'exports')
+    os.makedirs(export_dir, exist_ok=True)
+    stem, ext = os.path.splitext(default_name)
+    ts = _dt.datetime.now().strftime('%Y%m%d_%H%M%S')
+    return os.path.join(export_dir, f"{stem}_{ts}{ext}")
+
+
+def _build_excel_workbook(df):
+    import openpyxl
+    from openpyxl.styles import Font, PatternFill
+    from openpyxl.utils.dataframe import dataframe_to_rows
+    wb = openpyxl.Workbook()
+    ws = wb.active
+    ws.title = "Importaciones"
+    header_fill = PatternFill(start_color='00CEC9', end_color='00CEC9', fill_type='solid')
+    header_font = Font(bold=True, color='FFFFFF')
+    for row in dataframe_to_rows(df, index=False, header=True):
+        ws.append(row)
+    for cell in ws[1]:
+        cell.fill = header_fill
+        cell.font = header_font
+    sample = min(len(ws['A']), 101)
+    for col in ws.columns:
+        max_len = 0
+        for cell in list(col)[:sample]:
+            max_len = max(max_len, len(str(cell.value or '')))
+        ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 50)
+    return wb
 
 os.chdir(os.path.dirname(os.path.abspath(__file__)))
 
@@ -51,16 +107,19 @@ _PLOTLY_THEME = dict(
     margin=dict(l=40, r=20, t=30, b=40),
 )
 
+_FIG_LOCK = threading.Lock()
+
 def _apply_plotly_theme(fig):
     if fig and not isinstance(fig, str):
-        try:
-            fig.update_layout(**_PLOTLY_THEME)
-            fig.update_layout(
-                hoverlabel=dict(namelength=-1),
-                yaxis=dict(tickformat=','),
-            )
-        except Exception:
-            pass
+        with _FIG_LOCK:
+            try:
+                fig.update_layout(**_PLOTLY_THEME)
+                fig.update_layout(
+                    hoverlabel=dict(namelength=-1),
+                    yaxis=dict(tickformat=','),
+                )
+            except Exception:
+                pass
     return fig
 
 def _loading_graph(figure, height='400px', graph_id=None):
@@ -103,6 +162,28 @@ def _error_fig(e):
     _apply_plotly_theme(fig)
     fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False))
     return fig
+
+def _pending_fig():
+    fig = go.Figure()
+    fig.add_annotation(text='Calculando…', xref='paper', yref='paper', x=0.5, y=0.5, showarrow=False,
+                       font=dict(size=14, color='rgba(0,206,201,0.8)'))
+    _apply_plotly_theme(fig)
+    fig.update_layout(xaxis=dict(visible=False), yaxis=dict(visible=False))
+    return fig
+
+def _filter_key(selected_years, primary_aranc, primary_importador,
+                start_day, start_month, start_year,
+                end_day, end_month, end_year,
+                search_producto, search_importador,
+                search_pa_orig, search_pa_adq, search_comuna, column_dropdown,
+                section_value, hsdesc_value, drill_data):
+    import hashlib
+    key_parts = [str(x) for x in [selected_years, primary_aranc, primary_importador,
+                start_day, start_month, start_year, end_day, end_month, end_year,
+                search_producto, search_importador,
+                search_pa_orig, search_pa_adq, search_comuna, column_dropdown,
+                section_value, hsdesc_value, drill_data]]
+    return hashlib.md5('|'.join(key_parts).encode()).hexdigest()
 
 # ── Filtros ──
 def _componer_fecha(dia, mes, anyo):
@@ -223,13 +304,24 @@ def _gen_monthly_charts(conn, años, where_str):
             f"SUM({_cant_expr}) AS CANT_MERC",
             where_clause=where_str, group_by='1', order_by='1', conn=conn)
         if not df.empty:
-            df['MES'] = pd.to_datetime(df['MES'] + '-01')
+            df = df.dropna(subset=['MES'])
+            df['MES'] = pd.to_datetime(df['MES'] + '-01', errors='coerce')
+            df = df.dropna(subset=['MES']).sort_values('MES')
+            df['CIF_ITEM'] = pd.to_numeric(df['CIF_ITEM'], errors='coerce')
+            df['CANT_MERC'] = pd.to_numeric(df['CANT_MERC'], errors='coerce')
+            df = df.dropna(subset=['CIF_ITEM', 'CANT_MERC'])
+            if df.empty:
+                return _empty_fig(), _empty_fig(), _empty_fig(), pd.DataFrame()
             fig_cif = px.area(df, x='MES', y='CIF_ITEM', title='CIF_ITEM Mensual vs Tiempo', template=None)
             fig_kilos = px.area(df, x='MES', y='CANT_MERC', title='CANT_MERC Mensual vs Tiempo', template=None)
             df['CIF_ITEM/KILOS'] = df['CIF_ITEM'] / df['CANT_MERC'].replace(0, np.nan)
+            df = df[np.isfinite(df['CIF_ITEM/KILOS'].fillna(np.nan))]
+            if df.empty:
+                return fig_cif, fig_kilos, _empty_fig(), df
             fig_kilos_cif = px.line(df, x='MES', y='CIF_ITEM/KILOS', title='CIF_ITEM/KILOS Mensual vs Tiempo', template=None)
             return fig_cif, fig_kilos, fig_kilos_cif, df
     except Exception as e:
+        import traceback; print('[gen-error] monthly:', e, flush=True); traceback.print_exc()
         return _error_fig(e), _error_fig(e), _error_fig(e), pd.DataFrame()
     return _empty_fig(), _empty_fig(), _empty_fig(), pd.DataFrame()
 
@@ -265,19 +357,28 @@ def _gen_pct_bar(conn, años, column_dropdown, filters):
             _ensure_import_loaded()
         where_parts = (filters or []) + [f'{_cif_expr} IS NOT NULL']
         where_str = ' AND '.join(where_parts)
-        total_df = query_parquet(f"SUM({_cif_expr}) AS CIF_ITEM", where_clause=where_str, conn=conn)
-        total = float(total_df['CIF_ITEM'].iloc[0]) if total_df is not None and not total_df.empty and total_df['CIF_ITEM'].iloc[0] is not None else 0
-        df = query_parquet(f'CAST("{column_dropdown}" AS VARCHAR) AS "{column_dropdown}", SUM({_cif_expr}) AS CIF_ITEM', where_clause=where_str, group_by=f'"{column_dropdown}"', order_by='CIF_ITEM DESC', limit=30, conn=conn)
-        if df is not None and not df.empty:
+        df = query_parquet(f'CAST("{column_dropdown}" AS VARCHAR) AS "{column_dropdown}", SUM({_cif_expr}) AS CIF_ITEM, SUM(SUM({_cif_expr})) OVER () AS _total', where_clause=where_str, group_by=f'"{column_dropdown}"', order_by='CIF_ITEM DESC', limit=30, conn=conn)
+        total = float(df['_total'].iloc[0]) if df is not None and not df.empty and df['_total'].iloc[0] is not None else 0
+        if df is not None and '_total' in df.columns:
+            df = df.drop(columns=['_total'])
+        if df is not None and not df.empty and total and np.isfinite(total):
             df = enriquecer_desde_diccionarios(df, [column_dropdown])
             if column_dropdown == 'NUM_UNICO_IMPORTADOR':
                 df[column_dropdown] = df[column_dropdown].astype(str).map(import_dict).fillna(df[column_dropdown].astype(str))
-            df['%'] = (df['CIF_ITEM'] / total * 100).round(2) if total else 0
+            df['CIF_ITEM'] = pd.to_numeric(df['CIF_ITEM'], errors='coerce')
+            df = df.dropna(subset=['CIF_ITEM'])
+            if df.empty:
+                return _empty_fig()
+            df['%'] = (df['CIF_ITEM'] / total * 100).round(2)
+            df = df[np.isfinite(df['%'])]
+            if df.empty:
+                return _empty_fig()
             fig = px.bar(df, x=column_dropdown, y='%',
                          title=f'Porcentaje de CIF_ITEM por {column_dropdown} (Top 30)', template=None)
             fig.update_layout(xaxis_tickangle=-45, xaxis=dict(automargin=True))
             return fig
     except Exception as e:
+        import traceback; print('[gen-error] pct_bar:', e, flush=True); traceback.print_exc()
         return _error_fig(e)
     return _empty_fig()
 
@@ -295,17 +396,25 @@ def _gen_section_pie(conn, años, filters):
         return None
 
 def _gen_top20_analysis(conn, años, where_str):
-    """Merged query for top20 freq + val (same GROUP BY)."""
+    """Top20 freq + val with LIMIT pushed to SQL (20 rows each, no full GROUP BY fetch)."""
     try:
-        df = query_parquet(
-            f"{_product_expr} AS PRODUCTO, COUNT(*) AS Conteo, SUM({_cif_expr}) AS Total_CIF",
-            where_clause=where_str, group_by="PRODUCTO", conn=conn)
-        if df is None or df.empty:
+        freq_df = query_parquet(
+            f"{_product_expr} AS PRODUCTO, COUNT(*) AS Conteo",
+            where_clause=where_str, group_by="PRODUCTO",
+            order_by="Conteo DESC", limit=20, conn=conn)
+        val_df = query_parquet(
+            f"{_product_expr} AS PRODUCTO, SUM({_cif_expr}) AS Total_CIF",
+            where_clause=where_str, group_by="PRODUCTO",
+            order_by="Total_CIF DESC", limit=20, conn=conn)
+        if (freq_df is None or freq_df.empty) and (val_df is None or val_df.empty):
             empty = pd.DataFrame(columns=['PRODUCTO', 'Conteo'])
             return _empty_fig(), empty, _empty_fig(), pd.DataFrame(columns=['PRODUCTO', 'Total_CIF'])
-
-        freq_df = df.nlargest(20, 'Conteo').reset_index(drop=True)
-        val_df = df.nlargest(20, 'Total_CIF').reset_index(drop=True)
+        if freq_df is None:
+            freq_df = pd.DataFrame(columns=['PRODUCTO', 'Conteo'])
+        if val_df is None:
+            val_df = pd.DataFrame(columns=['PRODUCTO', 'Total_CIF'])
+        freq_df = freq_df.reset_index(drop=True)
+        val_df = val_df.reset_index(drop=True)
 
         fig_freq = _empty_fig()
         if not freq_df.empty:
@@ -525,8 +634,8 @@ def _gen_ruts_coincidentes(conn, años, filters):
             return 0
         loaded = set(df['r'].dropna().astype(str).str.strip())
         return int(len(loaded & import_ruts_set))
-    except Exception:
-        import traceback; traceback.print_exc()
+    except Exception as e:
+        import traceback; print('[gen-error] ruts_coinc:', e, flush=True); traceback.print_exc()
         return 0
 
 def _gen_indicadores(df_mensual):
@@ -778,13 +887,21 @@ def _gen_importer_concentration(conn, años, filters):
         _ensure_import_loaded()
         where_parts = (filters or []) + [f'{_cif_expr} IS NOT NULL']
         where_str = ' AND '.join(where_parts)
-        total_df = query_parquet(f"SUM({_cif_expr}) AS CIF_ITEM", where_clause=where_str, conn=conn)
-        total = float(total_df['CIF_ITEM'].iloc[0]) if total_df is not None and not total_df.empty and total_df['CIF_ITEM'].iloc[0] is not None else 0
-        df = query_parquet(f'CAST("NUM_UNICO_IMPORTADOR" AS VARCHAR) AS "NUM_UNICO_IMPORTADOR", SUM({_cif_expr}) AS CIF_ITEM', where_clause=where_str, group_by='"NUM_UNICO_IMPORTADOR"', order_by='CIF_ITEM DESC', limit=30, conn=conn)
-        if df is not None and not df.empty:
+        df = query_parquet(f'CAST("NUM_UNICO_IMPORTADOR" AS VARCHAR) AS "NUM_UNICO_IMPORTADOR", SUM({_cif_expr}) AS CIF_ITEM, SUM(SUM({_cif_expr})) OVER () AS _total', where_clause=where_str, group_by='"NUM_UNICO_IMPORTADOR"', order_by='CIF_ITEM DESC', limit=30, conn=conn)
+        total = float(df['_total'].iloc[0]) if df is not None and not df.empty and df['_total'].iloc[0] is not None else 0
+        if df is not None and '_total' in df.columns:
+            df = df.drop(columns=['_total'])
+        if df is not None and not df.empty and total and np.isfinite(total):
+            df['CIF_ITEM'] = pd.to_numeric(df['CIF_ITEM'], errors='coerce')
+            df = df.dropna(subset=['CIF_ITEM'])
+            if df.empty:
+                return _empty_fig()
             df = df.sort_values('CIF_ITEM', ascending=False)
-            df['% Acumulado'] = (df['CIF_ITEM'].cumsum() / total * 100).round(1) if total else 0
-            df['% Individual'] = (df['CIF_ITEM'] / total * 100).round(1) if total else 0
+            df['% Acumulado'] = (df['CIF_ITEM'].cumsum() / total * 100).round(1)
+            df['% Individual'] = (df['CIF_ITEM'] / total * 100).round(1)
+            df = df[np.isfinite(df['% Individual'])]
+            if df.empty:
+                return _empty_fig()
             top10 = df.head(10).copy()
             top10['Importador'] = top10['NUM_UNICO_IMPORTADOR'].astype(str).map(import_dict).fillna(top10['NUM_UNICO_IMPORTADOR'].astype(str))
             fig = px.bar(top10, x='Importador', y='% Individual',
@@ -794,6 +911,7 @@ def _gen_importer_concentration(conn, años, filters):
             fig.update_traces(texttemplate='%{text}%', textposition='outside')
             return fig
     except Exception as e:
+        import traceback; print('[gen-error] importer_conc:', e, flush=True); traceback.print_exc()
         return _error_fig(e)
     return _empty_fig()
 
@@ -875,6 +993,12 @@ def _gen_avg_price_analysis(conn, años, where_str):
 # ── Cache de tabs y mapping gen → tab ──
 _TAB_CACHE_LOCK = threading.Lock()
 _TAB_CACHE = {}
+_PRECACHE_RUNNING = set()
+_RUN_LOCK = threading.Lock()
+_RUN_INFLIGHT = {}
+_SLOW_CACHE = {}
+_RESUMEN_FAST = ['monthly', 'yoy', 'price_hist']
+_RESUMEN_SLOW = ['pct_bar', 'importer_conc', 'ruts_coinc']
 _TAB_GENS = {
     'Resumen': ['monthly', 'yoy', 'price_hist', 'pct_bar', 'importer_conc', 'ruts_coinc'],
     'Paises': ['country_analysis', 'heat_analysis', 'box_precios'],
@@ -921,46 +1045,83 @@ _GEN_CALLS = {
     'tariff':         (_gen_tariff_analysis, lambda f, w, c: [f]),
 }
 
-_tab_style = {
-    'backgroundColor': 'var(--bg-secondary)', 'color': 'var(--text-secondary)',
-    'border': '1px solid var(--border)', 'borderBottom': 'none',
-    'padding': '10px 18px', 'fontWeight': 'bold', 'fontSize': '13px'
-}
-_tab_selected_style = {
-    'backgroundColor': 'var(--bg-primary)', 'color': 'var(--accent)',
-    'border': '1px solid var(--border)', 'borderBottom': 'none',
-    'borderTop': '2px solid var(--accent)', 'padding': '10px 18px',
-    'fontWeight': 'bold', 'fontSize': '13px'
-}
-_tabs_colors = {'border': 'var(--border)', 'primary': 'var(--accent)', 'background': 'var(--bg-primary)'}
 _tab_labels = ['Resumen', 'Paises', 'Productos', 'Transporte y Rutas',
                'Geografía', 'Tablas', 'Financiero', 'Clasificación']
 
 _grid = {'display': 'grid', 'gridTemplateColumns': '1fr 1fr', 'gap': '16px'}
 
 
+def _deep_val(v):
+    try:
+        if isinstance(v, pd.DataFrame):
+            return v.copy(deep=True)
+        if isinstance(v, tuple):
+            return tuple(_deep_val(x) for x in v)
+        if isinstance(v, list):
+            return [_deep_val(x) for x in v]
+        if isinstance(v, go.Figure):
+            return go.Figure(v)
+    except Exception:
+        pass
+    return v
+
+
+def _share_results(results):
+    try:
+        return {k: _deep_val(v) for k, v in results.items()}
+    except Exception:
+        return dict(results)
+
+
+def _run_key(años, where_str, filters, column_dropdown, gen_keys):
+    import hashlib, json
+    try:
+        raw = json.dumps([años, where_str, filters, column_dropdown, sorted(gen_keys)],
+                         sort_keys=True, default=str)
+    except Exception:
+        raw = str([años, where_str, filters, column_dropdown, sorted(gen_keys)])
+    return hashlib.md5(raw.encode()).hexdigest()
+
+
 def _run_gens(años, where_str, filters, column_dropdown, gen_keys):
     if not gen_keys:
         return {}
-    results = {}
-    max_workers = min(len(gen_keys), 2)
+    key = _run_key(años, where_str, filters, column_dropdown, gen_keys)
+    with _RUN_LOCK:
+        inflight = _RUN_INFLIGHT.get(key)
+        if inflight is None:
+            import threading as _th
+            inflight = {'event': _th.Event(), 'results': None}
+            _RUN_INFLIGHT[key] = inflight
+            owner = True
+        else:
+            owner = False
+    if not owner:
+        if inflight['event'].wait(timeout=180) and inflight['results'] is not None:
+            print(f"[perf] shared run {key[:8]}", flush=True)
+            return _share_results(inflight['results'])
+    try:
+        return _run_gens_inner(años, where_str, filters, column_dropdown, gen_keys, key)
+    finally:
+        if owner:
+            with _RUN_LOCK:
+                _RUN_INFLIGHT.pop(key, None)
 
-    def _run_one(key):
+
+def _run_gens_inner(años, where_str, filters, column_dropdown, gen_keys, key=None):
+    results = {}
+    max_workers = min(len(gen_keys), 4)
+
+    def _run_one(k):
         import time as _tt
         _ts = _tt.perf_counter()
-        func, args_fn = _GEN_CALLS[key]
+        func, args_fn = _GEN_CALLS[k]
         extra = args_fn(filters, where_str, column_dropdown)
-        conn = _create_conn(años)
-        try:
-            res = func(conn, años, *extra)
-            _el = _tt.perf_counter() - _ts
-            print(f"[perf-gen] {key} {_el:.2f}s", flush=True)
-            return key, res
-        finally:
-            try:
-                conn.close()
-            except Exception:
-                pass
+        conn = _get_worker_conn(años)
+        res = func(conn, años, *extra)
+        _el = _tt.perf_counter() - _ts
+        print(f"[perf-gen] {k} {_el:.2f}s", flush=True)
+        return k, res
 
     _FALLBACKS = {
         'importadores': lambda: pd.DataFrame(columns=['RUT_ORIGINAL', 'NOMBRE_REEMPLAZADO']),
@@ -974,19 +1135,25 @@ def _run_gens(años, where_str, filters, column_dropdown, gen_keys):
         'ruts_coinc': lambda: 0,
     }
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        future_to_key = {pool.submit(_run_one, key): key for key in gen_keys}
+        future_to_key = {pool.submit(_run_one, k): k for k in gen_keys}
         for future in as_completed(future_to_key):
-            key = future_to_key[future]
+            k = future_to_key[future]
             try:
                 _, result = future.result()
                 if result is None:
-                    result = _FALLBACKS.get(key, lambda: _error_fig(f'Vacio {key}'))()
-                results[key] = result
+                    result = _FALLBACKS.get(k, lambda: _error_fig(f'Vacio {k}'))()
+                results[k] = result
             except Exception:
                 import traceback; traceback.print_exc()
-                fb = _FALLBACKS.get(key)
-                results[key] = fb() if fb else _error_fig(f'Error en {key}')
+                fb = _FALLBACKS.get(k)
+                results[k] = fb() if fb else _error_fig(f'Error en {k}')
 
+    if key is not None:
+        with _RUN_LOCK:
+            inflight = _RUN_INFLIGHT.get(key)
+            if inflight is not None:
+                inflight['results'] = results
+                inflight['event'].set()
     return results
 
 
@@ -995,7 +1162,8 @@ def _build_tab(tab_name, results):
     if tab_name == 'Resumen':
         fig_m, fig_mk, fig_mkc, df_m = results['monthly']
         tc, tk, pk = _gen_indicadores(df_m)
-        n_ruts = results.get('ruts_coinc', 0) or 0
+        n_ruts = results.get('ruts_coinc', None)
+        n_ruts_txt = f"{n_ruts:,}" if isinstance(n_ruts, (int, float)) else "…"
         card_indicadores = html.Div([
             html.Div([
                 html.Div("Total CIF", className='stat-label'),
@@ -1011,7 +1179,7 @@ def _build_tab(tab_name, results):
             ], className='stat-item'),
             html.Div([
                 html.Div("Nº RUTs Coincidentes", className='stat-label'),
-                html.Div(f"{n_ruts:,}", style={'color': 'var(--info)'}, className='stat-value')
+                html.Div(n_ruts_txt, id='stat-ruts-value', style={'color': 'var(--info)'}, className='stat-value')
             ], className='stat-item'),
         ], className='stat-card')
         return html.Div([
@@ -1109,79 +1277,34 @@ def _build_tab(tab_name, results):
     return html.P("Tab desconocido")
 
 
-def _generar_visualizaciones(años, primary_aranc, primary_importador,
-                              start_day, start_month, start_year,
-                              end_day, end_month, end_year,
-                              search_producto, search_importador, search_pa_orig,
-                              search_pa_adq, search_comuna, column_dropdown,
-                              section_value, hsdesc_value, drill_data=None):
-    """Genera TODOS los tabs (para exportación HTML). Reusa _TAB_CACHE si está disponible."""
-    import hashlib, json
-    key_parts = [str(x) for x in [años, primary_aranc, primary_importador,
-                start_day, start_month, start_year,
-                end_day, end_month, end_year,
-                search_producto, search_importador,
-                search_pa_orig, search_pa_adq, search_comuna, column_dropdown,
-                section_value, hsdesc_value, drill_data]]
-    cur_key = hashlib.md5('|'.join(key_parts).encode()).hexdigest()
-
-    filters = _build_filter_sql(primary_aranc, primary_importador,
-                                start_day, start_month, start_year,
-                                end_day, end_month, end_year,
-                                search_producto, search_importador,
-                                search_pa_orig, search_pa_adq, search_comuna)
-    filters = _apply_drill_filter(filters, drill_data)
-    where_str = ' AND '.join(filters) if filters else None
-
-    # Reuse cached tabs when possible
-    tabs = []
-    gen_needed = []
-    for label in _tab_labels:
-        with _TAB_CACHE_LOCK:
-            cached = _TAB_CACHE.get(label)
-        if cached and cached[0] == cur_key:
-            tabs.append((label, cached[1]))
-        else:
-            gen_needed.append(label)
-            tabs.append((label, None))
-
-    if gen_needed:
-        needed_keys = list({k for label in gen_needed for k in _TAB_GENS[label]})
-        results = _run_gens(años, where_str, filters, column_dropdown, needed_keys)
-        for label in gen_needed:
-            tab_results = {k: results[k] for k in _TAB_GENS[label]}
-            content = _build_tab(label, tab_results)
-            with _TAB_CACHE_LOCK:
-                _TAB_CACHE[label] = (cur_key, content)
-            # Replace None in tabs
-            idx = _tab_labels.index(label)
-            tabs[idx] = (label, content)
-
-    tab_children = [
-        dcc.Tab(label=label, style=_tab_style, selected_style=_tab_selected_style, children=content)
-        for label, content in tabs
-    ]
-    return dcc.Tabs(tab_children, style={'marginTop': '10px'}, colors=_tabs_colors)
-
-
 def _precache_next_tab(active_tab, cur_key, años, where_str, filters, column_dropdown):
-    """Pre-genera el siguiente tab en background."""
+    """Pre-genera el siguiente tab en background (un solo precache vivo por llave)."""
     idx = _tab_labels.index(active_tab)
     next_idx = (idx + 1) % len(_tab_labels)
     next_tab = _tab_labels[next_idx]
     with _TAB_CACHE_LOCK:
         if next_tab in _TAB_CACHE and _TAB_CACHE[next_tab][0] == cur_key:
             return
-    gen_keys = _TAB_GENS.get(next_tab, [])
-    if not gen_keys:
-        return
+        if (cur_key, next_tab) in _PRECACHE_RUNNING:
+            return
+        _PRECACHE_RUNNING.add((cur_key, next_tab))
     try:
+        gen_keys = _TAB_GENS.get(next_tab, [])
+        if not gen_keys:
+            return
         results = _run_gens(años, where_str, filters, column_dropdown, gen_keys)
+        if next_tab == 'Resumen':
+            slow = {k: results[k] for k in _RESUMEN_SLOW if k in results}
+            with _TAB_CACHE_LOCK:
+                _SLOW_CACHE[cur_key] = slow
         content = _build_tab(next_tab, results)
         with _TAB_CACHE_LOCK:
             _TAB_CACHE[next_tab] = (cur_key, content)
     except Exception:
         import traceback; traceback.print_exc()
+    finally:
+        with _TAB_CACHE_LOCK:
+            _PRECACHE_RUNNING.discard((cur_key, next_tab))
 
 
 # ── Callbacks ──
@@ -1410,13 +1533,11 @@ def register_callbacks(app):
         if stored_data and isinstance(stored_data, dict):
             primary_aranc = stored_data.get('primary_aranc')
             primary_importador = stored_data.get('primary_importador')
-        import hashlib, json
-        key_parts = [str(x) for x in [selected_years, primary_aranc, primary_importador,
+        cur_key = _filter_key(selected_years, primary_aranc, primary_importador,
                     start_day, start_month, start_year, end_day, end_month, end_year,
                     search_producto, search_importador,
                     search_pa_orig, search_pa_adq, search_comuna, column_dropdown,
-                    section_value, hsdesc_value, drill_data]]
-        cur_key = hashlib.md5('|'.join(key_parts).encode()).hexdigest()
+                    section_value, hsdesc_value, drill_data)
         with _TAB_CACHE_LOCK:
             if cur_key == prev_key and active_tab in _TAB_CACHE and _TAB_CACHE[active_tab][0] == cur_key:
                 return _TAB_CACHE[active_tab][1], {'tab': active_tab}, cur_key
@@ -1433,7 +1554,16 @@ def register_callbacks(app):
         import time as _t
         _t0 = _t.perf_counter()
         gen_keys = _TAB_GENS.get(active_tab, [])
+        if active_tab == 'Resumen':
+            gen_keys = [k for k in _RESUMEN_FAST if k in _TAB_GENS.get(active_tab, [])]
         results = _run_gens(selected_years, where_str, filters, column_dropdown, gen_keys)
+        if active_tab == 'Resumen':
+            with _TAB_CACHE_LOCK:
+                slow_cached = _SLOW_CACHE.get(cur_key)
+            if slow_cached and all(k in slow_cached for k in _RESUMEN_SLOW):
+                results.update(slow_cached)
+            else:
+                results.update({'pct_bar': _pending_fig(), 'importer_conc': _pending_fig()})
         content = _build_tab(active_tab, results)
         _elapsed = _t.perf_counter() - _t0
         print(f"[perf] tab={active_tab} años={selected_years} gens={','.join(gen_keys)} tiempo={_elapsed:.2f}s", flush=True)
@@ -1441,14 +1571,100 @@ def register_callbacks(app):
         with _TAB_CACHE_LOCK:
             _TAB_CACHE[active_tab] = (cur_key, content)
 
-        # Pre-cache siguiente tab en background
-        t = threading.Thread(target=_precache_next_tab,
-                             args=(active_tab, cur_key, selected_years,
-                                   where_str, filters, column_dropdown),
-                             daemon=True)
-        t.start()
+        # Pre-cache siguiente tab en background (omitido si ya está en caché;
+        # si Resumen tiene slow pendiente, lo encadena update_resumen_slow al terminar)
+        with _TAB_CACHE_LOCK:
+            _idx = _tab_labels.index(active_tab)
+            _next = _tab_labels[(_idx + 1) % len(_tab_labels)]
+            _need_precache = not (_next in _TAB_CACHE and _TAB_CACHE[_next][0] == cur_key)
+            if active_tab == 'Resumen' and cur_key not in _SLOW_CACHE:
+                _need_precache = False
+        if _need_precache:
+            t = threading.Thread(target=_precache_next_tab,
+                                 args=(active_tab, cur_key, selected_years,
+                                       where_str, filters, column_dropdown),
+                                 daemon=True)
+            t.start()
 
         return content, {'tab': active_tab}, cur_key
+
+    @app.callback(
+        Output('g-pct', 'figure'),
+        Output('g-importer-conc', 'figure'),
+        Output('stat-ruts-value', 'children'),
+        Input('viz-cache-key', 'data'),
+        Input('main-tabs', 'value'),
+        State('selected-years', 'data'),
+        State('stored-data', 'data'),
+        State('start-day', 'value'),
+        State('start-month', 'value'),
+        State('start-year', 'value'),
+        State('end-day', 'value'),
+        State('end-month', 'value'),
+        State('end-year', 'value'),
+        State('search-producto', 'value'),
+        State('search-importador', 'value'),
+        State('search-pa-orig', 'value'),
+        State('search-pa-adq', 'value'),
+        State('search-comuna', 'value'),
+        State('column-dropdown', 'value'),
+        State('section-dropdown', 'value'),
+        State('hsdesc-dropdown', 'value'),
+        State('drill-store', 'data'),
+        prevent_initial_call=True
+    )
+    def update_resumen_slow(cur_key, active_tab, selected_years, stored_data,
+                            start_day, start_month, start_year,
+                            end_day, end_month, end_year,
+                            search_producto, search_importador,
+                            search_pa_orig, search_pa_adq, search_comuna,
+                            column_dropdown, section_value, hsdesc_value, drill_data):
+        if active_tab != 'Resumen' or not cur_key or not selected_years:
+            raise PreventUpdate
+        with _TAB_CACHE_LOCK:
+            slow_cached = _SLOW_CACHE.get(cur_key)
+        if slow_cached and all(k in slow_cached for k in _RESUMEN_SLOW):
+            n = slow_cached.get('ruts_coinc', None)
+            return (_apply_plotly_theme(slow_cached['pct_bar']),
+                    _apply_plotly_theme(slow_cached['importer_conc']),
+                    f"{n:,}" if isinstance(n, (int, float)) else "…")
+        primary_aranc = primary_importador = None
+        if stored_data and isinstance(stored_data, dict):
+            primary_aranc = stored_data.get('primary_aranc')
+            primary_importador = stored_data.get('primary_importador')
+        filters = _build_filter_sql(primary_aranc, primary_importador,
+                                    start_day, start_month, start_year,
+                                    end_day, end_month, end_year,
+                                    search_producto, search_importador,
+                                    search_pa_orig, search_pa_adq, search_comuna)
+        filters = _apply_drill_filter(filters, drill_data)
+        where_str = ' AND '.join(filters) if filters else None
+        import time as _t
+        _t0 = _t.perf_counter()
+        results = _run_gens(selected_years, where_str, filters, column_dropdown, _RESUMEN_SLOW)
+        print(f"[perf] resumen-slow años={selected_years} tiempo={_t.perf_counter() - _t0:.2f}s", flush=True)
+        with _TAB_CACHE_LOCK:
+            _SLOW_CACHE[cur_key] = {k: results[k] for k in _RESUMEN_SLOW if k in results}
+            slow_cached = _SLOW_CACHE.get(cur_key)
+        n = slow_cached.get('ruts_coinc', None)
+        figs = (_apply_plotly_theme(slow_cached.get('pct_bar', _pending_fig())),
+                _apply_plotly_theme(slow_cached.get('importer_conc', _pending_fig())),
+                f"{n:,}" if isinstance(n, (int, float)) else "…")
+        with _TAB_CACHE_LOCK:
+            _idx = _tab_labels.index('Resumen')
+            _next = _tab_labels[(_idx + 1) % len(_tab_labels)]
+            _need_precache = not (_next in _TAB_CACHE and _TAB_CACHE[_next][0] == cur_key)
+            if _need_precache and (cur_key, _next) not in _PRECACHE_RUNNING:
+                _launch = True
+            else:
+                _launch = False
+        if _launch:
+            t = threading.Thread(target=_precache_next_tab,
+                                 args=('Resumen', cur_key, selected_years,
+                                       where_str, filters, column_dropdown),
+                                 daemon=True)
+            t.start()
+        return figs
 
     @app.callback(
         Output('download-csv', 'data'),
@@ -1492,84 +1708,18 @@ def register_callbacks(app):
             df = enriquecer_desde_diccionarios(df, ['PA_ORIG', 'PA_ADQ', 'CODCOMUN', 'VIA_TRAN'])
             if 'NUM_UNICO_IMPORTADOR' in df.columns:
                 df['NUM_UNICO_IMPORTADOR'] = df['NUM_UNICO_IMPORTADOR'].astype(str).map(import_dict).fillna(df['NUM_UNICO_IMPORTADOR'].astype(str))
-            return dcc.send_string(df.to_csv(index=False, encoding='utf-8-sig'), "importaciones_export.csv") 
+            if _IS_DESKTOP:
+                path = _desktop_save_path("importaciones_export.csv")
+                if not path:
+                    raise PreventUpdate
+                try:
+                    df.to_csv(path, index=False, encoding='utf-8-sig')
+                except Exception:
+                    path = _fallback_export_path("importaciones_export.csv")
+                    df.to_csv(path, index=False, encoding='utf-8-sig')
+                return dash.no_update
+            return dcc.send_string(df.to_csv(index=False, encoding='utf-8-sig'), "importaciones_export.csv")
         raise PreventUpdate
-
-    @app.callback(
-        Output('download-html', 'data'),
-        Input('btn-export-html', 'n_clicks'),
-        State('selected-years', 'data'),
-        State('stored-data', 'data'),
-        State('start-day', 'value'),
-        State('start-month', 'value'),
-        State('start-year', 'value'),
-        State('end-day', 'value'),
-        State('end-month', 'value'),
-        State('end-year', 'value'),
-        State('search-producto', 'value'),
-        State('search-importador', 'value'),
-        State('search-pa-orig', 'value'),
-        State('search-pa-adq', 'value'),
-        State('search-comuna', 'value'),
-        State('column-dropdown', 'value'),
-        State('section-dropdown', 'value'),
-        State('hsdesc-dropdown', 'value'),
-        prevent_initial_call=True
-    )
-    def export_html(n_clicks, selected_years, stored_data,
-                    start_day, start_month, start_year,
-                    end_day, end_month, end_year,
-                    search_producto, search_importador,
-                    search_pa_orig, search_pa_adq, search_comuna,
-                    column_dropdown, section_value, hsdesc_value):
-        if not n_clicks or not selected_years:
-            raise PreventUpdate
-        primary_aranc = primary_importador = None
-        if stored_data and isinstance(stored_data, dict):
-            primary_aranc = stored_data.get('primary_aranc')
-            primary_importador = stored_data.get('primary_importador')
-        tabs = _generar_visualizaciones(
-            selected_years, primary_aranc, primary_importador,
-            start_day, start_month, start_year,
-            end_day, end_month, end_year,
-            search_producto, search_importador,
-            search_pa_orig, search_pa_adq, search_comuna,
-            column_dropdown, section_value, hsdesc_value
-        )
-        import plotly.io as pio
-        try:
-            html_parts = ['<html><head><meta charset="utf-8"><title>Dashboard Importaciones</title>',
-                          '<script src="https://cdn.plot.ly/plotly-2.35.2.min.js"></script></head><body>']
-            excluded = {'Importadores Coincidentes', 'Top 20 Productos por Frecuencia (Completo)',
-                        'Top 20 Productos por Valor CIF (Completo)', 'Top 20 Transacciones Individuales',
-                        'Precio Promedio por Pais de Origen', 'Precio Promedio por Pais de Adquisicion'}
-            for tab in tabs.children:
-                content_div = tab.children
-                if hasattr(content_div, 'children') and isinstance(content_div.children, list):
-                    label = getattr(tab, 'label', '')
-                    html_parts.append(f'<h2>{label}</h2>')
-                    for child in content_div.children:
-                        if hasattr(child, 'children') and isinstance(child.children, list):
-                            title = ''
-                            graph = None
-                            for c in child.children:
-                                if isinstance(c, str):
-                                    title = c
-                                if hasattr(c, 'type') and c.type == 'Loading':
-                                    if hasattr(c, 'children') and hasattr(c.children, 'type') and c.children.type == 'Graph':
-                                        graph = c.children.figure
-                            if title and graph and title not in excluded:
-                                try:
-                                    html_parts.append(f'<h3>{title}</h3>')
-                                    html_parts.append(pio.to_html(graph, include_plotlyjs=False, full_html=False))
-                                except:
-                                    pass
-            html_parts.append('</body></html>')
-            content = '\n'.join(html_parts)
-            return dcc.send_string(content, "dashboard_graficos.html")
-        except Exception as e:
-            import traceback; traceback.print_exc()
-            raise PreventUpdate
 
     @app.callback(
         Output('download-excel', 'data'),
@@ -1616,25 +1766,19 @@ def register_callbacks(app):
                                                      'PTO_EMB', 'PTO_DESEM', 'ADU', 'TPO_DOCTO'])
             if 'NUM_UNICO_IMPORTADOR' in df.columns:
                 df['NUM_UNICO_IMPORTADOR'] = df['NUM_UNICO_IMPORTADOR'].astype(str).map(import_dict).fillna(df['NUM_UNICO_IMPORTADOR'].astype(str))
-            import openpyxl
+            wb = _build_excel_workbook(df)
+            if _IS_DESKTOP:
+                path = _desktop_save_path("importaciones_export.xlsx")
+                if not path:
+                    raise PreventUpdate
+                try:
+                    wb.save(path)
+                except Exception:
+                    path = _fallback_export_path("importaciones_export.xlsx")
+                    wb.save(path)
+                return dash.no_update
             import io
-            from openpyxl.styles import Font, PatternFill, Alignment
             buf = io.BytesIO()
-            wb = openpyxl.Workbook()
-            ws = wb.active
-            ws.title = "Importaciones"
-            header_fill = PatternFill(start_color='00CEC9', end_color='00CEC9', fill_type='solid')
-            header_font = Font(bold=True, color='FFFFFF')
-            for c, col_name in enumerate(df.columns, 1):
-                cell = ws.cell(row=1, column=c, value=col_name)
-                cell.fill = header_fill
-                cell.font = header_font
-            for r, row in df.iterrows():
-                for c, val in enumerate(row, 1):
-                    ws.cell(row=r+2, column=c, value=val)
-            for col in ws.columns:
-                max_len = max(len(str(cell.value or '')) for cell in col)
-                ws.column_dimensions[col[0].column_letter].width = min(max_len + 3, 50)
             wb.save(buf)
             buf.seek(0)
             return dcc.send_bytes(buf.read(), "importaciones_export.xlsx")
@@ -1702,20 +1846,6 @@ def register_callbacks(app):
             return options, dash.no_update
         except:
             return ([{'label': current_value, 'value': current_value}] if current_value else []), dash.no_update
-
-    clientside_callback(
-        """
-        function(n_clicks) {
-            if (n_clicks > 0) {
-                setTimeout(function() { window.print(); }, 500);
-            }
-            return 0;
-        }
-        """,
-        Output('btn-print', 'n_clicks'),
-        Input('btn-print', 'n_clicks'),
-        prevent_initial_call=True
-    )
 
     # ── Loading overlay show/hide ──
     clientside_callback(

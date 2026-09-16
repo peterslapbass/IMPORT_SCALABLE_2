@@ -116,9 +116,39 @@ def _attach_years(conn, años):
 def _create_conn(años=None):
     conn = duckdb.connect()
     conn.execute(f"PRAGMA memory_limit='{_MEMORY_LIMIT}'")
-    conn.execute("PRAGMA threads=4")
+    conn.execute("PRAGMA threads=2")
     if años:
         _attach_years(conn, años)
+    return conn
+
+
+_worker_state = threading.local()
+
+
+def _worker_key(años):
+    if not años:
+        return ()
+    return tuple(sorted(str(a) for a in años))
+
+
+def _get_worker_conn(años):
+    key = _worker_key(años)
+    cache = getattr(_worker_state, 'conns', None)
+    if cache is None:
+        cache = {}
+        _worker_state.conns = cache
+    conn = cache.get(key)
+    if conn is not None:
+        try:
+            conn.execute("SELECT 1")
+            return conn
+        except Exception:
+            try:
+                conn.close()
+            except Exception:
+                pass
+    conn = _create_conn(años or None)
+    cache[key] = conn
     return conn
 
 
@@ -369,19 +399,33 @@ def eliminar_acentos(texto):
 _import_mtime = 0
 _import_cache_dict = {}
 _import_cache_set = set()
+_import_lock = threading.Lock()
+
+
+def _needs_import_reload(mtime):
+    return mtime != _import_mtime or len(_import_cache_dict) == 0
+
+
 def _ensure_import_loaded():
     global _import_mtime
     try:
         mtime = os.path.getmtime(os.path.join('data', 'import.txt'))
     except Exception:
         mtime = 0
-    if mtime != _import_mtime or len(_import_cache_dict) == 0:
+    if not _needs_import_reload(mtime):
+        return
+    with _import_lock:
+        if not _needs_import_reload(mtime):
+            return
         df = pd.read_csv(os.path.join('data', 'import.txt'), sep='\t', encoding='utf-8', usecols=['RUT', 'RAZON_SOCIAL'], dtype={'RUT': str, 'RAZON_SOCIAL': str})
         df['RUT'] = df['RUT'].astype(str).str.strip()
+        new_dict = dict(zip(df['RUT'], df['RAZON_SOCIAL']))
+        new_set = set(df['RUT'].values)
+        del df
         _import_cache_dict.clear()
-        _import_cache_dict.update(dict(zip(df['RUT'], df['RAZON_SOCIAL'])))
+        _import_cache_dict.update(new_dict)
         _import_cache_set.clear()
-        _import_cache_set.update(set(df['RUT'].values))
+        _import_cache_set.update(new_set)
         globals()['_import_mtime'] = mtime
 import_dict = _import_cache_dict
 import_ruts_set = _import_cache_set

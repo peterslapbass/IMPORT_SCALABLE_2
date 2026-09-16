@@ -153,8 +153,8 @@ Las 21 secciones del sistema armonizado:
 ### 4.1 Configuración
 
 ```sql
-PRAGMA memory_limit = '8GB';  -- Límite de memoria RAM
-PRAGMA threads = 4;            -- Hilos paralelos por query
+PRAGMA memory_limit = '35% RAM';  -- Adaptado al equipo (`_memory_limit_str`)
+PRAGMA threads = 2;               -- 2 hilos por query (4 workers × 2, sin sobresuscribir CPU)
 ```
 
 ### 4.2 Conexiones
@@ -162,7 +162,9 @@ PRAGMA threads = 4;            -- Hilos paralelos por query
 - Cada año es un archivo DuckDB separado: `data/importaciones_{año}.db`
 - Las queries multi-año usan `ATTACH READ_ONLY` + `UNION ALL BY NAME`
 - La conexión global se recicla al cambiar los años seleccionados
-- En generación paralela de gráficos, cada hilo crea su propia conexión
+- En generación paralela, cada hilo del pool reutiliza su conexión (`_get_worker_conn`, ThreadLocal por set de años)
+- Totales agregados en una sola pasada (`SUM(SUM(...)) OVER ()`) en vez de doble full-scan
+- Top 20 con `ORDER BY + LIMIT` en SQL (no se trae el GROUP BY completo a Pandas)
 
 ### 4.3 Columnas decimales (14)
 
@@ -182,7 +184,7 @@ Creados en cada tabla `importaciones`:
 
 | Tab | Generadores | Tipo de visualización |
 |---|---|---|
-| **Resumen** | monthly, yoy, price_hist, pct_bar, importer_conc | Área, líneas, histograma, barras |
+| **Resumen** | monthly, yoy, price_hist (etapa rápida) + pct_bar, importer_conc, ruts_coinc (etapa lenta en fondo) | Área, líneas, histograma, barras |
 | **Países** | country_analysis, heat_analysis, box_precios | Líneas, heatmap, boxplot |
 | **Productos** | section, top20_analysis, treemap | Pie, barras horizontales, treemap |
 | **Transporte y Rutas** | transporte, aduana, operacion, bultos, port_analysis | Barras, pie, sankey, mapa, matriz |
@@ -222,13 +224,13 @@ Creados en cada tabla `importaciones`:
 │                   callbacks.py                            │
 │   ┌──────────┐  ┌──────────┐  ┌──────────────────────┐   │
 │   │ Filtros  │  │  Tabs    │  │  Exportación          │   │
-│   │ SQL      │  │  Caché   │  │  CSV / Excel / HTML   │   │
+│   │ SQL      │  │  Caché   │  │  CSV / Excel          │   │
 │   └────┬─────┘  └────┬─────┘  └──────────────────────┘   │
 │        │              │                                    │
 │   ┌────▼──────────────▼─────┐                              │
 │   │  _run_gens()           │                              │
-│   │  ThreadPoolExecutor    │                              │
-│   │  (max 4 workers)       │                              │
+│   │  ThreadPool +          │                              │
+│   │  single-flight (4 max) │                              │
 │   └────┬──────────────┬─────┘                              │
 └────────┼──────────────┼────────────────────────────────────┘
          │              │
@@ -254,14 +256,35 @@ Creados en cada tabla `importaciones`:
 
 ### 7.1 Paralelismo
 - Generación de gráficos: hasta 4 hilos simultáneos (ThreadPoolExecutor)
-- DuckDB: hasta 4 hilos por query (PRAGMA threads=4)
-- Precarga del siguiente tab en segundo plano
+- DuckDB: 2 hilos por query (PRAGMA threads=2)
+- Conexiones reutilizadas por hilo (sin re-ATTACH por gráfico)
+- Precarga del siguiente tab en segundo plano, encadenada tras la etapa lenta de Resumen para no competir por CPU/disco
 
 ### 7.2 Caché
 - Caché de tabs generados en memoria (`_TAB_CACHE`)
+- Caché de etapa lenta de Resumen (`_SLOW_CACHE`) por hash de filtros
+- Single-flight (`_run_gens`): precache y navegación comparten el mismo cómputo en vez de duplicar queries
 - Invalidación por hash de parámetros de filtro
 - Caché de diccionarios (DICCIONARIO.xlsx) con verificación de mtime
+- `import_dict` (3.1M RUTs) con carga single-flight + precarga en hilo de fondo al arrancar
 - Caché de estructura DIN y listado de parquets
+
+### 7.3 Resumen en 2 etapas
+- Etapa rápida (`monthly, yoy, price_hist`): el tab se muestra en ~0.5s
+- Etapa lenta (`pct_bar, importer_conc, ruts_coinc`): completa `g-pct`, `g-importer-conc` y `stat-ruts-value` en fondo (~6s año 2026)
+- Placeholders `Calculando…` (`_pending_fig`) mientras tanto
+
+### 7.4 Thread-safety de Plotly
+- Warmup del template (`px.area/line/bar` dummy) en un solo hilo al arrancar: evita la carrera de inicialización perezosa que causaba `ValueError: Invalid value` en frío
+- Tema Plotly aplicado bajo lock (`_FIG_LOCK`)
+
+### 7.5 Exportación en escritorio
+- En modo pywebview, CSV/Excel usan diálogo nativo Guardar como (`FileDialog.SAVE`); en browser, descarga clásica
+- Fallback a `exports/` con timestamp si el diálogo falla
+- Excel construido con `dataframe_to_rows` (no celda por celda)
+
+### 7.6 Tests
+- `tests/test_callbacks.py`: 32 tests pytest de funciones puras (filtros, figuras, llaves de caché, single-flight), sin DuckDB
 
 ### 7.3 Almacenamiento
 - Parquet: formato columnar comprimido (~17 GB total)

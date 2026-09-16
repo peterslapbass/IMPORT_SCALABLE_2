@@ -23,11 +23,14 @@
 - **Filtros combinados** — años, código arancelario, RUT importador, rango de fechas, producto, país de origen/adquisición, comuna, sección HS
 - **Drill-down** — haz clic en cualquier gráfico para filtrar dinámicamente por esa dimensión
 - **Tema oscuro/claro** — persistente en localStorage
-- **Exportación** — CSV, Excel, HTML (todos los gráficos), impresión PDF
+- **Exportación** — CSV, Excel (en escritorio abre Guardar como)
 - **Modo escritorio** — ventana nativa con pywebview (Edge Chromium)
 - **Ingesta incremental** — agrega nuevos archivos mensuales sin reconstruir todo
 - **Caché de tabs** — precarga del siguiente tab en segundo plano para navegación instantánea
-- **Procesamiento paralelo** — generación simultánea de gráficos con ThreadPoolExecutor
+- **Procesamiento paralelo** — generación simultánea de gráficos con ThreadPoolExecutor (hasta 4 hilos, conexiones DuckDB reutilizadas por hilo)
+- **Resumen en 2 etapas** — el tab Resumen muestra sus gráficos rápidos al instante y completa los pesados (porcentaje, concentración, RUTs) en segundo plano
+- **Single-flight** — precache y navegación comparten el mismo cómputo en vez de consultar DuckDB dos veces
+- **Tests** — suite `pytest` con 32 tests (`tests/test_callbacks.py`)
 
 ## Tecnologías
 
@@ -220,15 +223,28 @@ Los archivos de importación contienen las siguientes columnas (definidas en `da
 El proyecto usa DuckDB con las siguientes optimizaciones:
 
 ```sql
-PRAGMA threads = 4;         -- Hasta 4 hilos por query
-PRAGMA memory_limit = '8GB'; -- Límite de memoria
+PRAGMA threads = 2;         -- 2 hilos por query (4 workers × 2, sin sobresuscribir CPU)
+PRAGMA memory_limit = '35% RAM'; -- Adaptado al equipo (ver `_memory_limit_str` en utils/helpers.py)
 ```
+
+- **Conexiones reutilizadas** — cada hilo del pool mantiene su conexión `ATTACH READ_ONLY` (`_get_worker_conn`), sin reabrir la base por cada gráfico
+- **`import.txt` con single-flight** — el diccionario RUT→Razón Social (3.1M) se carga una sola vez con lock y se precarga en segundo plano al arrancar
+- **SQL con totales en una pasada** — `SUM(SUM(...)) OVER ()` evita el doble full-scan en porcentaje y concentración; Top 20 con `LIMIT` en SQL
+- **Caché** — tabs generados en memoria por hash de filtros; precache encadenado y single-flight evitan recomputar
+- **Plotly thread-safe** — warmup del template al arrancar + tema aplicado bajo lock
 
 **Recomendaciones:**
 - **SSD** — Las queries sobre parquets se benefician enormemente de discos SSD
 - **Memoria RAM** — 8 GB o más recomendado
-- **Paralelismo** — La generación de gráficos corre en hasta 4 hilos simultáneos (`ThreadPoolExecutor`)
-- **Caché** — Los tabs ya generados se cachean en memoria; cambiar filtros invalida la caché
+- **Tiempos típicos (año 2026)** — Resumen rápido ~0.5s (+ etapa lenta en fondo), resto de tabs <1s, Tablas ~2s
+
+## Tests
+
+```bash
+.venv\Scripts\python.exe -m pytest tests\test_callbacks.py -q
+```
+
+32 tests de funciones puras (filtros SQL, figuras, llaves de caché, single-flight). Sin dependencia de DuckDB ni parquets.
 
 ---
 
@@ -242,7 +258,7 @@ PRAGMA memory_limit = '8GB'; -- Límite de memoria
 | `data/import.txt` no encontrado | Archivo no descargado desde SII | Descargar desde [SII Chile](https://www.sii.cl) y copiar a `data/import.txt` |
 | Los gráficos muestran RUT en vez de nombre de empresa | `import.txt` faltante o incompleto | Ver fila anterior |
 | Puerto 8050 ya en uso | Otra instancia ejecutándose | Cerrar la otra instancia o cambiar el puerto en `app.py` |
-| Error de memoria DuckDB | `PRAGMA memory_limit` muy alto para el equipo | Reducir a `4GB` o `2GB` en `utils/helpers.py` línea 84 |
+| Error de memoria DuckDB | `PRAGMA memory_limit` muy alto para el equipo | Ajustar el factor en `_memory_limit_str()` en `utils/helpers.py` |
 
 ---
 
@@ -257,7 +273,6 @@ PRAGMA memory_limit = '8GB'; -- Límite de memoria
 │
 ├── assets/                         # CSS, logo
 │   ├── dashboard.css               # Estilos (tema oscuro/claro)
-│   ├── print.css                   # Estilos de impresión PDF
 │   └── logo.png                    # Logo de la aplicación
 │
 ├── data/                           # Bases de datos, diccionarios, parquets
@@ -277,8 +292,10 @@ PRAGMA memory_limit = '8GB'; -- Límite de memoria
 │   ├── generar_mapeo_hs_actividades.py  # TF-IDF HS ↔ actividades
 │   └── scrape_diccionarios_comext.py    # Scraping Comext
 │
+├── exports/                        # Fallback de exportaciones en modo escritorio (ignorado por git)
+│
 ├── tests/
-│   └── test_callbacks.py          # Tests unitarios (pytest)
+│   └── test_callbacks.py          # 32 tests unitarios (pytest)
 │
 └── utils/
     └── helpers.py                  # Conexiones DuckDB, consultas, diccionarios

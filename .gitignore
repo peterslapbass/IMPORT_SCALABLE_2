@@ -24,6 +24,11 @@ venv/
 uploads/
 !uploads/.gitkeep
 
+# --- Exports (desktop Guardar como fallback) ---
+exports/*.csv
+exports/*.xlsx
+exports/*.html
+
 # --- OS files ---
 .DS_Store
 Thumbs.db
